@@ -9,8 +9,6 @@
 - [JSON Canonicalization Scheme (JCS)](https://tools.ietf.org/html/rfc8785)
 - [`serde`](https://crates.io/crates/serde)
 
-<br>
-
 #### License
 
 <sup>
