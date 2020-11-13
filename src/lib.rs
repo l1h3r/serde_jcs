@@ -4,7 +4,6 @@
 //!
 //! [RFC 8785](https://tools.ietf.org/html/rfc8785)
 //!
-mod buffer;
 mod entry;
 mod ser;
 

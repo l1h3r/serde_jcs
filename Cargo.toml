@@ -12,6 +12,6 @@ include = ["src/**/*.rs", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
 readme = "README.md"
 
 [dependencies]
-ryu = { git = "https://github.com/Tropid/ryu-js", rev = "ed781f5772882e38c53d40707a60b4f11414b9c8", default-features = false }
+ryu-js = { version = "0.2", default-features = false }
 serde = { version = "1.0", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["std", "float_roundtrip"] }

@@ -12,7 +12,6 @@ use serde_json::Value;
 use std::io;
 use std::io::Write;
 
-use crate::buffer::Buffer;
 use crate::entry::Entry;
 
 #[inline]
@@ -78,14 +77,14 @@ impl JcsFormatter {
   fn write_float<W, F>(&mut self, writer: &mut W, category: FpCategory, value: F) -> io::Result<()>
   where
     W: Write + ?Sized,
-    F: ryu::Float,
+    F: ryu_js::Float,
   {
     match category {
       FpCategory::Nan | FpCategory::Infinite => Err(io::Error::new(io::ErrorKind::Other, "oh no")),
       FpCategory::Zero => self.scope(writer).write_all(b"0"),
       FpCategory::Normal | FpCategory::Subnormal => self
         .scope(writer)
-        .write_all(Buffer::new().format_finite(value).as_bytes()),
+        .write_all(ryu_js::Buffer::new().format_finite(value).as_bytes()),
     }
   }
 }
