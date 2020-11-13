@@ -15,3 +15,6 @@ readme = "README.md"
 ryu-js = { version = "0.2", default-features = false }
 serde = { version = "1.0", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["std", "float_roundtrip"] }
+
+[package.metadata.docs.rs]
+all-features = true

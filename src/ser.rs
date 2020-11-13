@@ -14,6 +14,13 @@ use std::io::Write;
 
 use crate::entry::Entry;
 
+/// Serialize the given value as a String of JSON.
+///
+/// Serialization is performed as specified in [RFC 8785](https://tools.ietf.org/html/rfc8785).
+///
+/// # Errors
+///
+/// Serialization can fail if `T`'s implementation of `Serialize` fails.
 #[inline]
 pub fn to_string<T>(value: &T) -> Result<String>
 where
@@ -26,6 +33,13 @@ where
   Ok(data)
 }
 
+/// Serialize the given value as a JSON byte vector.
+///
+/// Serialization is performed as specified in [RFC 8785](https://tools.ietf.org/html/rfc8785).
+///
+/// # Errors
+///
+/// Serialization can fail if `T`'s implementation of `Serialize` fails.
 #[inline]
 pub fn to_vec<T>(value: &T) -> Result<Vec<u8>>
 where
@@ -38,6 +52,13 @@ where
   Ok(data)
 }
 
+/// Serialize the given value as JSON into the IO stream.
+///
+/// Serialization is performed as specified in [RFC 8785](https://tools.ietf.org/html/rfc8785).
+///
+/// # Errors
+///
+/// Serialization can fail if `T`'s implementation of `Serialize` fails.
 #[inline]
 pub fn to_writer<W, T>(writer: W, value: &T) -> Result<()>
 where
