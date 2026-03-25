@@ -1,6 +1,6 @@
 [package]
 name = "serde_jcs"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["l1h3r <5410284+l1h3r@users.noreply.github.com>"]
 categories = ["encoding"]
 description = "JSON Canonicalization Scheme (JCS) for Serde"
