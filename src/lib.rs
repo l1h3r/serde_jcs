@@ -7,8 +7,9 @@
 
 use ryu_js::Buffer;
 use serde::Serialize;
-use serde_json::Result;
-use serde_json::Serializer;
+use serde::ser::Serializer;
+use serde_json::Error;
+use serde_json::Serializer as JsonSerializer;
 use serde_json::Value;
 use serde_json::from_slice;
 use serde_json::from_str;
@@ -18,7 +19,6 @@ use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
 use std::mem::take;
-use std::num::FpCategory;
 
 /// Serialize the given value as a String of JSON.
 ///
@@ -28,7 +28,7 @@ use std::num::FpCategory;
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` fails.
 #[inline]
-pub fn to_string<T>(value: &T) -> Result<String>
+pub fn to_string<T>(value: &T) -> Result<String, Error>
 where
   T: Serialize + ?Sized,
 {
@@ -48,7 +48,7 @@ where
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` fails.
 #[inline]
-pub fn to_vec<T>(value: &T) -> Result<Vec<u8>>
+pub fn to_vec<T>(value: &T) -> Result<Vec<u8>, Error>
 where
   T: Serialize + ?Sized,
 {
@@ -67,12 +67,26 @@ where
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` fails.
 #[inline]
-pub fn to_writer<W, T>(writer: W, value: &T) -> Result<()>
+pub fn to_writer<W, T>(writer: W, value: &T) -> Result<(), Error>
 where
   W: Write,
   T: Serialize + ?Sized,
 {
-  value.serialize(&mut Serializer::with_formatter(writer, JcsFormatter::new()))
+  value.serialize(&mut JcsSerializer::new(writer))
+}
+
+// -----------------------------------------------------------------------------
+// Errors
+// -----------------------------------------------------------------------------
+
+#[inline]
+fn invalid_float() -> io::Error {
+  io::Error::other("invalid float value")
+}
+
+#[inline]
+fn invalid_key() -> io::Error {
+  io::Error::other("invalid UTF-8 key")
 }
 
 // -----------------------------------------------------------------------------
@@ -88,7 +102,7 @@ impl Utf16Key {
   fn new(key: Vec<u8>) -> io::Result<Self> {
     let tag: Vec<u16> = from_slice::<Value>(&key)?
       .as_str()
-      .ok_or_else(|| io::Error::other("invalid UTF-8 key"))?
+      .ok_or_else(invalid_key)?
       .encode_utf16()
       .collect();
 
@@ -357,12 +371,13 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    match value.classify() {
-      FpCategory::Nan | FpCategory::Infinite => Err(io::Error::other("oh no")),
-      FpCategory::Zero => self.scope(writer).write_all(b"0"),
-      FpCategory::Normal | FpCategory::Subnormal => self
-        .scope(writer)
-        .write_all(Buffer::new().format_finite(value).as_bytes()),
+    if value.is_finite() {
+      let mut buffer: Buffer = Buffer::new();
+      let mut writer: Box<dyn Write> = self.scope(writer);
+
+      writer.write_all(buffer.format_finite(value).as_bytes())
+    } else {
+      Err(invalid_float())
     }
   }
 
@@ -500,5 +515,243 @@ impl Formatter for JcsFormatter {
     entry.object.insert(Utf16Key::new(key)?, val);
 
     Ok(())
+  }
+}
+
+// -----------------------------------------------------------------------------
+// JSON Serializer
+// -----------------------------------------------------------------------------
+
+type Proxy<'a, W> = &'a mut JsonSerializer<W, JcsFormatter>;
+
+struct JcsSerializer<W> {
+  inner: JsonSerializer<W, JcsFormatter>,
+}
+
+impl<W> JcsSerializer<W> {
+  #[inline]
+  fn new(writer: W) -> Self
+  where
+    W: Write,
+  {
+    Self {
+      inner: JsonSerializer::with_formatter(writer, JcsFormatter::new()),
+    }
+  }
+}
+
+impl<'a, W> Serializer for &'a mut JcsSerializer<W>
+where
+  W: Write,
+{
+  type Ok = <Proxy<'a, W> as Serializer>::Ok;
+  type Error = <Proxy<'a, W> as Serializer>::Error;
+
+  type SerializeSeq = <Proxy<'a, W> as Serializer>::SerializeSeq;
+  type SerializeTuple = <Proxy<'a, W> as Serializer>::SerializeTuple;
+  type SerializeTupleStruct = <Proxy<'a, W> as Serializer>::SerializeTupleStruct;
+  type SerializeTupleVariant = <Proxy<'a, W> as Serializer>::SerializeTupleVariant;
+  type SerializeMap = <Proxy<'a, W> as Serializer>::SerializeMap;
+  type SerializeStruct = <Proxy<'a, W> as Serializer>::SerializeStruct;
+  type SerializeStructVariant = <Proxy<'a, W> as Serializer>::SerializeStructVariant;
+
+  #[inline]
+  fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_bool(value)
+  }
+
+  #[inline]
+  fn serialize_i8(self, value: i8) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_i8(value)
+  }
+
+  #[inline]
+  fn serialize_i16(self, value: i16) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_i16(value)
+  }
+
+  #[inline]
+  fn serialize_i32(self, value: i32) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_i32(value)
+  }
+
+  #[inline]
+  fn serialize_i64(self, value: i64) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_i64(value)
+  }
+
+  #[inline]
+  fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_u8(value)
+  }
+
+  #[inline]
+  fn serialize_u16(self, value: u16) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_u16(value)
+  }
+
+  #[inline]
+  fn serialize_u32(self, value: u32) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_u32(value)
+  }
+
+  #[inline]
+  fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_u64(value)
+  }
+
+  #[inline]
+  fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
+    if value.is_finite() {
+      self.inner.serialize_f32(value)
+    } else {
+      Err(Self::Error::io(invalid_float()))
+    }
+  }
+
+  #[inline]
+  fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
+    if value.is_finite() {
+      self.inner.serialize_f64(value)
+    } else {
+      Err(Self::Error::io(invalid_float()))
+    }
+  }
+
+  #[inline]
+  fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_char(value)
+  }
+
+  #[inline]
+  fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_str(value)
+  }
+
+  #[inline]
+  fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_bytes(value)
+  }
+
+  #[inline]
+  fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_none()
+  }
+
+  #[inline]
+  fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
+  where
+    T: ?Sized + Serialize,
+  {
+    self.inner.serialize_some(value)
+  }
+
+  #[inline]
+  fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_unit()
+  }
+
+  #[inline]
+  fn serialize_unit_struct(self, name: &'static str) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_unit_struct(name)
+  }
+
+  #[inline]
+  fn serialize_unit_variant(
+    self,
+    name: &'static str,
+    variant_index: u32,
+    variant: &'static str,
+  ) -> Result<Self::Ok, Self::Error> {
+    self
+      .inner
+      .serialize_unit_variant(name, variant_index, variant)
+  }
+
+  #[inline]
+  fn serialize_newtype_struct<T>(
+    self,
+    name: &'static str,
+    value: &T,
+  ) -> Result<Self::Ok, Self::Error>
+  where
+    T: ?Sized + Serialize,
+  {
+    self.inner.serialize_newtype_struct(name, value)
+  }
+
+  #[inline]
+  fn serialize_newtype_variant<T>(
+    self,
+    name: &'static str,
+    variant_index: u32,
+    variant: &'static str,
+    value: &T,
+  ) -> Result<Self::Ok, Self::Error>
+  where
+    T: ?Sized + Serialize,
+  {
+    self
+      .inner
+      .serialize_newtype_variant(name, variant_index, variant, value)
+  }
+
+  #[inline]
+  fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+    self.inner.serialize_seq(len)
+  }
+
+  #[inline]
+  fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+    self.inner.serialize_tuple(len)
+  }
+
+  #[inline]
+  fn serialize_tuple_struct(
+    self,
+    name: &'static str,
+    len: usize,
+  ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+    self.inner.serialize_tuple_struct(name, len)
+  }
+
+  #[inline]
+  fn serialize_tuple_variant(
+    self,
+    name: &'static str,
+    variant_index: u32,
+    variant: &'static str,
+    len: usize,
+  ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+    self
+      .inner
+      .serialize_tuple_variant(name, variant_index, variant, len)
+  }
+
+  #[inline]
+  fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+    self.inner.serialize_map(len)
+  }
+
+  #[inline]
+  fn serialize_struct(
+    self,
+    name: &'static str,
+    len: usize,
+  ) -> Result<Self::SerializeStruct, Self::Error> {
+    self.inner.serialize_struct(name, len)
+  }
+
+  #[inline]
+  fn serialize_struct_variant(
+    self,
+    name: &'static str,
+    variant_index: u32,
+    variant: &'static str,
+    len: usize,
+  ) -> Result<Self::SerializeStructVariant, Self::Error> {
+    self
+      .inner
+      .serialize_struct_variant(name, variant_index, variant, len)
   }
 }

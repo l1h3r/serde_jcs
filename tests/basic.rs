@@ -1,4 +1,5 @@
 use serde_jcs::to_string;
+use serde_json::Error;
 use serde_json::Value;
 use serde_json::from_str;
 
@@ -18,6 +19,14 @@ fn assert_json_number(input: u64, expected: &str) {
   assert_eq!(received, expected);
 }
 
+#[track_caller]
+fn assert_json_number_err(input: u64) {
+  let json_val: f64 = f64::from_bits(input);
+  let received: Result<String, Error> = to_string(&json_val);
+
+  assert!(received.is_err());
+}
+
 #[test]
 fn test_rfc_appendix_b() {
   assert_json_number(0x0000000000000000, "0"); // Zero
@@ -29,6 +38,9 @@ fn test_rfc_appendix_b() {
   assert_json_number(0x4340000000000000, "9007199254740992"); // Max pos int
   assert_json_number(0xc340000000000000, "-9007199254740992"); // Max neg int
   assert_json_number(0x4430000000000000, "295147905179352830000"); // ~2**68
+
+  assert_json_number_err(0x7fffffffffffffff); // NaN
+  assert_json_number_err(0x7ff0000000000000); // Infinity
 
   assert_json_number(0x44b52d02c7e14af5, "9.999999999999997e+22");
   assert_json_number(0x44b52d02c7e14af6, "1e+23");
