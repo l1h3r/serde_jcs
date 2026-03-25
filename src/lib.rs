@@ -5,13 +5,14 @@
 //! [RFC 8785](https://tools.ietf.org/html/rfc8785)
 //!
 
+use ryu_js::Buffer;
 use serde::Serialize;
 use serde_json::Result;
 use serde_json::Serializer;
 use serde_json::Value;
+use serde_json::from_slice;
 use serde_json::from_str;
 use serde_json::ser::CharEscape;
-use serde_json::ser::CompactFormatter;
 use serde_json::ser::Formatter;
 use std::collections::BTreeMap;
 use std::io;
@@ -33,6 +34,7 @@ where
 {
   let data: Vec<u8> = to_vec(value)?;
 
+  // SAFETY: We only emit valid UTF-8.
   let data: String = unsafe { String::from_utf8_unchecked(data) };
 
   Ok(data)
@@ -73,16 +75,64 @@ where
   value.serialize(&mut Serializer::with_formatter(writer, JcsFormatter::new()))
 }
 
-#[derive(Clone, Debug)]
+// -----------------------------------------------------------------------------
+// UTF-16 Key
+// -----------------------------------------------------------------------------
+
+struct Utf16Key {
+  tag: Vec<u16>,
+  key: Vec<u8>,
+}
+
+impl Utf16Key {
+  fn new(key: Vec<u8>) -> io::Result<Self> {
+    let tag: Vec<u16> = from_slice::<Value>(&key)?
+      .as_str()
+      .ok_or_else(|| io::Error::other("invalid UTF-8 key"))?
+      .encode_utf16()
+      .collect();
+
+    Ok(Self { tag, key })
+  }
+}
+
+impl PartialEq for Utf16Key {
+  #[inline]
+  fn eq(&self, other: &Self) -> bool {
+    self.tag.eq(&other.tag)
+  }
+}
+
+impl Eq for Utf16Key {}
+
+impl PartialOrd for Utf16Key {
+  #[inline]
+  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl Ord for Utf16Key {
+  #[inline]
+  fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    self.tag.cmp(&other.tag)
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Formatter Entry
+// -----------------------------------------------------------------------------
+
 struct Entry {
-  object: BTreeMap<Vec<u8>, Vec<u8>>,
+  object: BTreeMap<Utf16Key, Vec<u8>>,
   next_key: Vec<u8>,
   next_val: Vec<u8>,
   complete: bool,
 }
 
 impl Entry {
-  fn new() -> Self {
+  #[inline]
+  const fn new() -> Self {
     Self {
       object: BTreeMap::new(),
       next_key: Vec::new(),
@@ -90,44 +140,44 @@ impl Entry {
       complete: false,
     }
   }
+
+  #[inline]
+  const fn complete(&mut self, value: bool) {
+    self.complete = value;
+  }
 }
 
-#[derive(Clone, Debug)]
-#[repr(transparent)]
-struct JcsFormatter(Vec<Entry>);
+// -----------------------------------------------------------------------------
+// JSON Formatter
+// -----------------------------------------------------------------------------
+
+struct JcsFormatter {
+  entries: Vec<Entry>,
+}
 
 impl JcsFormatter {
+  #[inline]
   const fn new() -> Self {
-    Self(Vec::new())
+    Self {
+      entries: Vec::new(),
+    }
   }
 
+  #[inline]
   fn scope<'a, W>(&'a mut self, writer: &'a mut W) -> Box<dyn Write + 'a>
   where
     W: Write + ?Sized,
   {
-    match self.0.last_mut() {
+    match self.entry_mut() {
       Some(entry) if entry.complete => Box::new(&mut entry.next_val),
       Some(entry) => Box::new(&mut entry.next_key),
       None => Box::new(writer),
     }
   }
 
-  fn entry_mut(&mut self) -> io::Result<&mut Entry> {
-    self.0.last_mut().ok_or_else(|| io::Error::other("oh no"))
-  }
-
-  fn write_float<W, F>(&mut self, writer: &mut W, category: FpCategory, value: F) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-    F: ryu_js::Float,
-  {
-    match category {
-      FpCategory::Nan | FpCategory::Infinite => Err(io::Error::other("oh no")),
-      FpCategory::Zero => self.scope(writer).write_all(b"0"),
-      FpCategory::Normal | FpCategory::Subnormal => self
-        .scope(writer)
-        .write_all(ryu_js::Buffer::new().format_finite(value).as_bytes()),
-    }
+  #[inline]
+  fn entry_mut(&mut self) -> Option<&mut Entry> {
+    self.entries.last_mut()
   }
 }
 
@@ -173,7 +223,7 @@ impl Formatter for JcsFormatter {
     match escape {
       CharEscape::Quote => self.scope(writer).write_all(b"\\\""),
       CharEscape::ReverseSolidus => self.scope(writer).write_all(b"\\\\"),
-      CharEscape::Solidus => self.scope(writer).write_all(b"\\/"),
+      CharEscape::Solidus => self.scope(writer).write_all(b"/"),
       CharEscape::Backspace => self.scope(writer).write_all(b"\\b"),
       CharEscape::FormFeed => self.scope(writer).write_all(b"\\f"),
       CharEscape::LineFeed => self.scope(writer).write_all(b"\\n"),
@@ -184,11 +234,11 @@ impl Formatter for JcsFormatter {
   }
 
   #[inline]
-  fn write_number_str<W>(&mut self, _writer: &mut W, _value: &str) -> io::Result<()>
+  fn write_number_str<W>(&mut self, writer: &mut W, value: &str) -> io::Result<()>
   where
     W: Write + ?Sized,
   {
-    todo!("Handle number str (u128/i128)")
+    self.write_f64(writer, value.parse().map_err(io::Error::other)?)
   }
 
   #[inline]
@@ -196,7 +246,6 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    // TOOD: Check
     self.scope(writer).write_all(fragment.as_bytes())
   }
 
@@ -205,13 +254,10 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    // TOOD: Check
-    from_str::<Value>(fragment)?
-      .serialize(&mut Serializer::with_formatter(
-        self.scope(writer),
-        Self::new(),
-      ))
-      .map_err(Into::into)
+    let scope: Box<dyn Write> = self.scope(writer);
+    let value: Value = from_str(fragment)?;
+
+    to_writer(scope, &value).map_err(Into::into)
   }
 
   #[inline]
@@ -219,7 +265,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.write_i8(&mut self.scope(writer), value)
+    self.write_f64(writer, f64::from(value))
   }
 
   #[inline]
@@ -227,7 +273,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.write_i16(&mut self.scope(writer), value)
+    self.write_f64(writer, f64::from(value))
   }
 
   #[inline]
@@ -235,7 +281,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.write_i32(&mut self.scope(writer), value)
+    self.write_f64(writer, f64::from(value))
   }
 
   #[inline]
@@ -243,7 +289,15 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.write_i64(&mut self.scope(writer), value)
+    self.write_f64(writer, value as f64)
+  }
+
+  #[inline]
+  fn write_i128<W>(&mut self, writer: &mut W, value: i128) -> io::Result<()>
+  where
+    W: ?Sized + Write,
+  {
+    self.write_f64(writer, value as f64)
   }
 
   #[inline]
@@ -251,7 +305,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.write_u8(&mut self.scope(writer), value)
+    self.write_f64(writer, f64::from(value))
   }
 
   #[inline]
@@ -259,7 +313,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.write_u16(&mut self.scope(writer), value)
+    self.write_f64(writer, f64::from(value))
   }
 
   #[inline]
@@ -267,7 +321,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.write_u32(&mut self.scope(writer), value)
+    self.write_f64(writer, f64::from(value))
   }
 
   #[inline]
@@ -275,7 +329,15 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.write_u64(&mut self.scope(writer), value)
+    self.write_f64(writer, value as f64)
+  }
+
+  #[inline]
+  fn write_u128<W>(&mut self, writer: &mut W, value: u128) -> io::Result<()>
+  where
+    W: ?Sized + Write,
+  {
+    self.write_f64(writer, value as f64)
   }
 
   #[inline]
@@ -283,7 +345,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    self.write_float(writer, value.classify(), value)
+    self.write_f64(writer, f64::from(value))
   }
 
   #[inline]
@@ -291,7 +353,13 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    self.write_float(writer, value.classify(), value)
+    match value.classify() {
+      FpCategory::Nan | FpCategory::Infinite => Err(io::Error::other("oh no")),
+      FpCategory::Zero => self.scope(writer).write_all(b"0"),
+      FpCategory::Normal | FpCategory::Subnormal => self
+        .scope(writer)
+        .write_all(Buffer::new().format_finite(value).as_bytes()),
+    }
   }
 
   #[inline]
@@ -299,7 +367,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.begin_string(&mut self.scope(writer))
+    self.scope(writer).write_all(b"\"")
   }
 
   #[inline]
@@ -307,7 +375,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.end_string(&mut self.scope(writer))
+    self.scope(writer).write_all(b"\"")
   }
 
   #[inline]
@@ -315,7 +383,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.begin_array(&mut self.scope(writer))
+    self.scope(writer).write_all(b"[")
   }
 
   #[inline]
@@ -323,7 +391,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.end_array(&mut self.scope(writer))
+    self.scope(writer).write_all(b"]")
   }
 
   #[inline]
@@ -331,25 +399,27 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.begin_array_value(&mut self.scope(writer), first)
+    if first {
+      Ok(())
+    } else {
+      self.scope(writer).write_all(b",")
+    }
   }
 
   #[inline]
-  fn end_array_value<W>(&mut self, writer: &mut W) -> io::Result<()>
+  fn end_array_value<W>(&mut self, _writer: &mut W) -> io::Result<()>
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.end_array_value(&mut self.scope(writer))
+    Ok(())
   }
 
   #[inline]
-  fn begin_object<W>(&mut self, writer: &mut W) -> io::Result<()>
+  fn begin_object<W>(&mut self, _writer: &mut W) -> io::Result<()>
   where
     W: Write + ?Sized,
   {
-    CompactFormatter.begin_object(&mut self.scope(writer))?;
-
-    self.0.push(Entry::new());
+    self.entries.push(Entry::new());
 
     Ok(())
   }
@@ -358,24 +428,28 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    let entry: Entry = self.0.pop().ok_or_else(|| io::Error::other("oh no"))?;
+    let entry: Entry = self
+      .entries
+      .pop()
+      .ok_or_else(|| io::Error::other("end_object called before begin_object"))?;
 
-    let mut scope = self.scope(writer);
-    let mut first = true;
+    let mut scope: Box<dyn Write> = self.scope(writer);
 
-    for (key, val) in entry.object {
-      CompactFormatter.begin_object_key(&mut scope, first)?;
-      scope.write_all(&key)?;
-      CompactFormatter.end_object_key(&mut scope)?;
+    scope.write_all(b"{")?;
 
-      CompactFormatter.begin_object_value(&mut scope)?;
+    for (index, (key, val)) in entry.object.into_iter().enumerate() {
+      if index != 0 {
+        scope.write_all(b",")?;
+      }
+
+      scope.write_all(&key.key)?;
+      scope.write_all(b":")?;
       scope.write_all(&val)?;
-      CompactFormatter.end_object_value(&mut scope)?;
-
-      first = false;
     }
 
-    CompactFormatter.end_object(&mut scope)
+    scope.write_all(b"}")?;
+
+    Ok(())
   }
 
   #[inline]
@@ -383,9 +457,10 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    self.entry_mut().map(|entry| {
-      entry.complete = false;
-    })
+    self
+      .entry_mut()
+      .ok_or_else(|| io::Error::other("begin_object_key called before begin_object"))
+      .map(|entry| entry.complete(false))
   }
 
   #[inline]
@@ -393,9 +468,10 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    self.entry_mut().map(|entry| {
-      entry.complete = true;
-    })
+    self
+      .entry_mut()
+      .ok_or_else(|| io::Error::other("end_object_key called before begin_object"))
+      .map(|entry| entry.complete(true))
   }
 
   #[inline]
@@ -410,12 +486,14 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    let entry: &mut Entry = self.entry_mut()?;
+    let entry: &mut Entry = self
+      .entry_mut()
+      .ok_or_else(|| io::Error::other("end_object_value called before begin_object"))?;
 
     let key: Vec<u8> = take(&mut entry.next_key);
     let val: Vec<u8> = take(&mut entry.next_val);
 
-    entry.object.insert(key, val);
+    entry.object.insert(Utf16Key::new(key)?, val);
 
     Ok(())
   }
