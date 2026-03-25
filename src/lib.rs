@@ -284,6 +284,7 @@ impl Formatter for JcsFormatter {
     self.write_f64(writer, f64::from(value))
   }
 
+  #[expect(clippy::cast_precision_loss)]
   #[inline]
   fn write_i64<W>(&mut self, writer: &mut W, value: i64) -> io::Result<()>
   where
@@ -292,6 +293,7 @@ impl Formatter for JcsFormatter {
     self.write_f64(writer, value as f64)
   }
 
+  #[expect(clippy::cast_precision_loss)]
   #[inline]
   fn write_i128<W>(&mut self, writer: &mut W, value: i128) -> io::Result<()>
   where
@@ -324,6 +326,7 @@ impl Formatter for JcsFormatter {
     self.write_f64(writer, f64::from(value))
   }
 
+  #[expect(clippy::cast_precision_loss)]
   #[inline]
   fn write_u64<W>(&mut self, writer: &mut W, value: u64) -> io::Result<()>
   where
@@ -332,6 +335,7 @@ impl Formatter for JcsFormatter {
     self.write_f64(writer, value as f64)
   }
 
+  #[expect(clippy::cast_precision_loss)]
   #[inline]
   fn write_u128<W>(&mut self, writer: &mut W, value: u128) -> io::Result<()>
   where
