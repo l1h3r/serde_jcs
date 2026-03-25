@@ -62,3 +62,51 @@ fn test_rfc_appendix_e() {
     include_str!("fixtures/output/appendix_e.json"),
   );
 }
+
+#[test]
+fn test_rfc_appendix_i_arrays() {
+  assert_json(
+    include_str!("testdata/input/arrays.json"),
+    include_str!("testdata/output/arrays.json"),
+  );
+}
+
+#[test]
+fn test_rfc_appendix_i_french() {
+  assert_json(
+    include_str!("testdata/input/french.json"),
+    include_str!("testdata/output/french.json"),
+  );
+}
+
+#[test]
+fn test_rfc_appendix_i_structures() {
+  assert_json(
+    include_str!("testdata/input/structures.json"),
+    include_str!("testdata/output/structures.json"),
+  );
+}
+
+#[test]
+fn test_rfc_appendix_i_unicode() {
+  assert_json(
+    include_str!("testdata/input/unicode.json"),
+    include_str!("testdata/output/unicode.json"),
+  );
+}
+
+#[test]
+fn test_rfc_appendix_i_values() {
+  assert_json(
+    include_str!("testdata/input/values.json"),
+    include_str!("testdata/output/values.json"),
+  );
+}
+
+#[test]
+fn test_rfc_appendix_i_weird() {
+  assert_json(
+    include_str!("testdata/input/weird.json"),
+    include_str!("testdata/output/weird.json"),
+  );
+}
