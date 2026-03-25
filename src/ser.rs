@@ -1,13 +1,13 @@
-use core::mem::replace;
+use core::mem::take;
 use core::num::FpCategory;
 use serde::Serialize;
+use serde_json::Result;
+use serde_json::Serializer;
+use serde_json::Value;
 use serde_json::from_str;
 use serde_json::ser::CharEscape;
 use serde_json::ser::CompactFormatter;
 use serde_json::ser::Formatter;
-use serde_json::Result;
-use serde_json::Serializer;
-use serde_json::Value;
 
 use std::io;
 use std::io::Write;
@@ -89,10 +89,7 @@ impl JcsFormatter {
   }
 
   pub fn entry_mut(&mut self) -> io::Result<&mut Entry> {
-    self
-      .0
-      .last_mut()
-      .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "oh no"))
+    self.0.last_mut().ok_or_else(|| io::Error::other("oh no"))
   }
 
   fn write_float<W, F>(&mut self, writer: &mut W, category: FpCategory, value: F) -> io::Result<()>
@@ -101,7 +98,7 @@ impl JcsFormatter {
     F: ryu_js::Float,
   {
     match category {
-      FpCategory::Nan | FpCategory::Infinite => Err(io::Error::new(io::ErrorKind::Other, "oh no")),
+      FpCategory::Nan | FpCategory::Infinite => Err(io::Error::other("oh no")),
       FpCategory::Zero => self.scope(writer).write_all(b"0"),
       FpCategory::Normal | FpCategory::Subnormal => self
         .scope(writer)
@@ -337,10 +334,7 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    let entry: Entry = self
-      .0
-      .pop()
-      .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "oh no"))?;
+    let entry: Entry = self.0.pop().ok_or_else(|| io::Error::other("oh no"))?;
 
     let mut scope = self.scope(writer);
     let mut first = true;
@@ -394,8 +388,8 @@ impl Formatter for JcsFormatter {
   {
     let entry: &mut Entry = self.entry_mut()?;
 
-    let key: Vec<u8> = replace(&mut entry.next_key, Vec::new());
-    let val: Vec<u8> = replace(&mut entry.next_val, Vec::new());
+    let key: Vec<u8> = take(&mut entry.next_key);
+    let val: Vec<u8> = take(&mut entry.next_val);
 
     entry.object.insert(key, val);
 
