@@ -1,6 +1,6 @@
 use serde_jcs::to_string;
-use serde_json::from_str;
 use serde_json::Value;
+use serde_json::from_str;
 
 #[test]
 fn test_works() {
