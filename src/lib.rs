@@ -25,7 +25,6 @@ use serde::ser::Serializer;
 use serde_json::Error;
 use serde_json::Serializer as JsonSerializer;
 use serde_json::Value;
-use serde_json::from_slice;
 use serde_json::from_str;
 use serde_json::ser::CharEscape;
 use serde_json::ser::Formatter;
@@ -34,6 +33,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
 use std::mem::take;
+use std::str::from_utf8;
 
 macro_rules! forward {
   ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
@@ -203,11 +203,45 @@ struct Utf16Key {
 
 impl Utf16Key {
   fn new(key: Vec<u8>) -> io::Result<Self> {
-    let tag: Vec<u16> = from_slice::<Value>(&key)?
-      .as_str()
-      .ok_or_else(invalid_key)?
-      .encode_utf16()
-      .collect();
+    #[inline]
+    fn unescape(text: &str) -> Option<(u16, &str)> {
+      let (&escape, _): (&u8, _) = text.as_bytes().split_first()?;
+      let text: &str = text.get(1..)?;
+
+      match escape {
+        b'"' | b'\\' | b'/' => Some((u16::from(escape), text)),
+        b'b' => Some((0x08, text)),
+        b'f' => Some((0x0C, text)),
+        b'n' => Some((0x0A, text)),
+        b'r' => Some((0x0D, text)),
+        b't' => Some((0x09, text)),
+        b'u' => {
+          let (code, text): (&str, &str) = text.split_at_checked(4)?;
+          let unit: u16 = u16::from_str_radix(code, 16).ok()?;
+
+          Some((unit, text))
+        }
+        _ => None,
+      }
+    }
+
+    let mut text: &str = from_utf8(&key)
+      .ok()
+      .and_then(|text| text.strip_prefix('"'))
+      .and_then(|text| text.strip_suffix('"'))
+      .ok_or_else(invalid_key)?;
+
+    let mut tag: Vec<u16> = Vec::with_capacity(text.len());
+
+    while let Some((head, tail)) = text.split_once('\\') {
+      let (unit, tail): (u16, &str) = unescape(tail).ok_or_else(invalid_key)?;
+
+      tag.extend(head.encode_utf16());
+      tag.push(unit);
+      text = tail;
+    }
+
+    tag.extend(text.encode_utf16());
 
     Ok(Self { tag, key })
   }
@@ -265,6 +299,47 @@ impl Entry {
 }
 
 // -----------------------------------------------------------------------------
+// Formatter Scope
+// -----------------------------------------------------------------------------
+
+enum Scope<'a, W>
+where
+  W: Write + ?Sized,
+{
+  Buffer(&'a mut Vec<u8>),
+  Writer(&'a mut W),
+}
+
+impl<W> Write for Scope<'_, W>
+where
+  W: Write + ?Sized,
+{
+  #[inline]
+  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    match self {
+      Self::Buffer(buffer) => buffer.write(buf),
+      Self::Writer(writer) => writer.write(buf),
+    }
+  }
+
+  #[inline]
+  fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+    match self {
+      Self::Buffer(buffer) => buffer.write_all(buf),
+      Self::Writer(writer) => writer.write_all(buf),
+    }
+  }
+
+  #[inline]
+  fn flush(&mut self) -> io::Result<()> {
+    match self {
+      Self::Buffer(buffer) => buffer.flush(),
+      Self::Writer(writer) => writer.flush(),
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
 // JSON Formatter
 // -----------------------------------------------------------------------------
 
@@ -281,14 +356,14 @@ impl JcsFormatter {
   }
 
   #[inline]
-  fn scope<'a, W>(&'a mut self, writer: &'a mut W) -> Box<dyn Write + 'a>
+  fn scope<'a, W>(&'a mut self, writer: &'a mut W) -> Scope<'a, W>
   where
     W: Write + ?Sized,
   {
     match self.entry_mut() {
-      Some(entry) if entry.complete => Box::new(&mut entry.next_val),
-      Some(entry) => Box::new(&mut entry.next_key),
-      None => Box::new(writer),
+      Some(entry) if entry.complete => Scope::Buffer(&mut entry.next_val),
+      Some(entry) => Scope::Buffer(&mut entry.next_key),
+      None => Scope::Writer(writer),
     }
   }
 
@@ -371,10 +446,10 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    let scope: Box<dyn Write> = self.scope(writer);
+    let mut scope: Scope<'_, W> = self.scope(writer);
     let value: Value = from_str(fragment)?;
 
-    to_writer(scope, &value).map_err(Into::into)
+    to_writer(&mut scope as &mut dyn Write, &value).map_err(Into::into)
   }
 
   #[inline]
@@ -492,7 +567,7 @@ impl Formatter for JcsFormatter {
   {
     if value.is_finite() {
       let mut buffer: Buffer = Buffer::new();
-      let mut writer: Box<dyn Write> = self.scope(writer);
+      let mut writer: Scope<'_, W> = self.scope(writer);
 
       writer.write_all(buffer.format_finite(value).as_bytes())
     } else {
@@ -572,7 +647,7 @@ impl Formatter for JcsFormatter {
       .pop()
       .ok_or_else(|| missing_object("end_object"))?;
 
-    let mut scope: Box<dyn Write> = self.scope(writer);
+    let mut scope: Scope<'_, W> = self.scope(writer);
 
     scope.write_all(b"{")?;
 
