@@ -21,6 +21,7 @@ use serde_json::from_slice;
 use serde_json::from_str;
 use serde_json::ser::CharEscape;
 use serde_json::ser::Formatter;
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
@@ -102,6 +103,11 @@ fn invalid_key() -> io::Error {
 }
 
 #[inline]
+fn missing_object(event: &str) -> io::Error {
+  io::Error::other(format!("{event} called before begin_object"))
+}
+
+#[inline]
 fn unsafe_integer() -> io::Error {
   io::Error::other("integer outside safe range")
 }
@@ -138,14 +144,14 @@ impl Eq for Utf16Key {}
 
 impl PartialOrd for Utf16Key {
   #[inline]
-  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
     Some(self.cmp(other))
   }
 }
 
 impl Ord for Utf16Key {
   #[inline]
-  fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+  fn cmp(&self, other: &Self) -> Ordering {
     self.tag.cmp(&other.tag)
   }
 }
@@ -332,7 +338,7 @@ impl Formatter for JcsFormatter {
   #[inline]
   fn write_i128<W>(&mut self, writer: &mut W, value: i128) -> io::Result<()>
   where
-    W: ?Sized + Write,
+    W: Write + ?Sized,
   {
     if value.unsigned_abs() > u128::from(MAX_SAFE_INTEGER) {
       return Err(unsafe_integer());
@@ -382,7 +388,7 @@ impl Formatter for JcsFormatter {
   #[inline]
   fn write_u128<W>(&mut self, writer: &mut W, value: u128) -> io::Result<()>
   where
-    W: ?Sized + Write,
+    W: Write + ?Sized,
   {
     if value > u128::from(MAX_SAFE_INTEGER) {
       return Err(unsafe_integer());
@@ -476,6 +482,7 @@ impl Formatter for JcsFormatter {
     Ok(())
   }
 
+  #[inline]
   fn end_object<W>(&mut self, writer: &mut W) -> io::Result<()>
   where
     W: Write + ?Sized,
@@ -483,7 +490,7 @@ impl Formatter for JcsFormatter {
     let entry: Entry = self
       .entries
       .pop()
-      .ok_or_else(|| io::Error::other("end_object called before begin_object"))?;
+      .ok_or_else(|| missing_object("end_object"))?;
 
     let mut scope: Box<dyn Write> = self.scope(writer);
 
@@ -511,7 +518,7 @@ impl Formatter for JcsFormatter {
   {
     self
       .entry_mut()
-      .ok_or_else(|| io::Error::other("begin_object_key called before begin_object"))
+      .ok_or_else(|| missing_object("begin_object_key"))
       .map(|entry| entry.complete(false))
   }
 
@@ -522,7 +529,7 @@ impl Formatter for JcsFormatter {
   {
     self
       .entry_mut()
-      .ok_or_else(|| io::Error::other("end_object_key called before begin_object"))
+      .ok_or_else(|| missing_object("end_object_key"))
       .map(|entry| entry.complete(true))
   }
 
@@ -534,13 +541,14 @@ impl Formatter for JcsFormatter {
     Ok(())
   }
 
+  #[inline]
   fn end_object_value<W>(&mut self, _writer: &mut W) -> io::Result<()>
   where
     W: Write + ?Sized,
   {
     let entry: &mut Entry = self
       .entry_mut()
-      .ok_or_else(|| io::Error::other("end_object_value called before begin_object"))?;
+      .ok_or_else(|| missing_object("end_object_value"))?;
 
     let key: Vec<u8> = take(&mut entry.next_key);
     let val: Vec<u8> = take(&mut entry.next_val);
