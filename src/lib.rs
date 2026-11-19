@@ -20,13 +20,20 @@ use std::io;
 use std::io::Write;
 use std::mem::take;
 
+/// The largest integer magnitude that can be serialized, `2^53 - 1`.
+///
+/// Equal to ECMAScript's `Number.MAX_SAFE_INTEGER`.
+pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
 /// Serialize the given value as a String of JSON.
 ///
 /// Serialization is performed as specified in [RFC 8785](https://tools.ietf.org/html/rfc8785).
 ///
 /// # Errors
 ///
-/// Serialization can fail if `T`'s implementation of `Serialize` fails.
+/// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
+/// `value` contains a non-finite float or an integer outside
+/// ±[`MAX_SAFE_INTEGER`].
 #[inline]
 pub fn to_string<T>(value: &T) -> Result<String, Error>
 where
@@ -46,7 +53,9 @@ where
 ///
 /// # Errors
 ///
-/// Serialization can fail if `T`'s implementation of `Serialize` fails.
+/// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
+/// `value` contains a non-finite float or an integer outside
+/// ±[`MAX_SAFE_INTEGER`].
 #[inline]
 pub fn to_vec<T>(value: &T) -> Result<Vec<u8>, Error>
 where
@@ -65,7 +74,9 @@ where
 ///
 /// # Errors
 ///
-/// Serialization can fail if `T`'s implementation of `Serialize` fails.
+/// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
+/// `value` contains a non-finite float or an integer outside
+/// ±[`MAX_SAFE_INTEGER`].
 #[inline]
 pub fn to_writer<W, T>(writer: W, value: &T) -> Result<(), Error>
 where
@@ -87,6 +98,11 @@ fn invalid_float() -> io::Error {
 #[inline]
 fn invalid_key() -> io::Error {
   io::Error::other("invalid UTF-8 key")
+}
+
+#[inline]
+fn unsafe_integer() -> io::Error {
+  io::Error::other("integer outside safe range")
 }
 
 // -----------------------------------------------------------------------------
@@ -304,6 +320,10 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
+    if value.unsigned_abs() > MAX_SAFE_INTEGER {
+      return Err(unsafe_integer());
+    }
+
     self.write_f64(writer, value as f64)
   }
 
@@ -313,6 +333,10 @@ impl Formatter for JcsFormatter {
   where
     W: ?Sized + Write,
   {
+    if value.unsigned_abs() > u128::from(MAX_SAFE_INTEGER) {
+      return Err(unsafe_integer());
+    }
+
     self.write_f64(writer, value as f64)
   }
 
@@ -346,6 +370,10 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
+    if value > MAX_SAFE_INTEGER {
+      return Err(unsafe_integer());
+    }
+
     self.write_f64(writer, value as f64)
   }
 
@@ -355,6 +383,10 @@ impl Formatter for JcsFormatter {
   where
     W: ?Sized + Write,
   {
+    if value > u128::from(MAX_SAFE_INTEGER) {
+      return Err(unsafe_integer());
+    }
+
     self.write_f64(writer, value as f64)
   }
 
@@ -581,6 +613,11 @@ where
   }
 
   #[inline]
+  fn serialize_i128(self, value: i128) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_i128(value)
+  }
+
+  #[inline]
   fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
     self.inner.serialize_u8(value)
   }
@@ -598,6 +635,11 @@ where
   #[inline]
   fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
     self.inner.serialize_u64(value)
+  }
+
+  #[inline]
+  fn serialize_u128(self, value: u128) -> Result<Self::Ok, Self::Error> {
+    self.inner.serialize_u128(value)
   }
 
   #[inline]

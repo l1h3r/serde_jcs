@@ -1,3 +1,5 @@
+use serde::Serialize;
+use serde_jcs::MAX_SAFE_INTEGER;
 use serde_jcs::to_string;
 use serde_json::Error;
 use serde_json::Value;
@@ -23,6 +25,26 @@ fn assert_json_number(input: u64, expected: &str) {
 fn assert_json_number_err(input: u64) {
   let json_val: f64 = f64::from_bits(input);
   let received: Result<String, Error> = to_string(&json_val);
+
+  assert!(received.is_err());
+}
+
+#[track_caller]
+fn assert_json_integer<T>(input: T, expected: &str)
+where
+  T: Serialize,
+{
+  let received: String = to_string(&input).unwrap();
+
+  assert_eq!(received, expected);
+}
+
+#[track_caller]
+fn assert_json_integer_err<T>(input: T)
+where
+  T: Serialize,
+{
+  let received: Result<String, Error> = to_string(&input);
 
   assert!(received.is_err());
 }
@@ -57,6 +79,33 @@ fn test_rfc_appendix_b() {
   assert_json_number(0x41b3_de43_5555_5557, "333333333.33333343");
   assert_json_number(0xbecb_f647_612f_3696, "-0.0000033333333333333333");
   assert_json_number(0x4314_3ff3_c1cb_0959, "1424953923781206.2"); // Round to even
+}
+
+#[test]
+fn test_integers() {
+  assert_json_integer(MAX_SAFE_INTEGER, "9007199254740991");
+  assert_json_integer(9_007_199_254_740_991_i64, "9007199254740991");
+  assert_json_integer(-9_007_199_254_740_991_i64, "-9007199254740991");
+  assert_json_integer(9_007_199_254_740_991_u64, "9007199254740991");
+  assert_json_integer(9_007_199_254_740_991_i128, "9007199254740991");
+  assert_json_integer(-9_007_199_254_740_991_i128, "-9007199254740991");
+  assert_json_integer(9_007_199_254_740_991_u128, "9007199254740991");
+  assert_json_integer(-5_i128, "-5");
+}
+
+#[test]
+fn test_integers_unsafe() {
+  assert_json_integer_err(9_007_199_254_740_992_i64);
+  assert_json_integer_err(-9_007_199_254_740_992_i64);
+  assert_json_integer_err(9_007_199_254_740_992_u64);
+  assert_json_integer_err(9_007_199_254_740_992_i128);
+  assert_json_integer_err(-9_007_199_254_740_992_i128);
+  assert_json_integer_err(9_007_199_254_740_992_u128);
+  assert_json_integer_err(i64::MIN);
+  assert_json_integer_err(u64::MAX);
+  assert_json_integer_err(i128::MIN);
+  assert_json_integer_err(u128::MAX);
+  assert_json_integer_err(from_str::<Value>("9007199254740992").unwrap());
 }
 
 #[test]
