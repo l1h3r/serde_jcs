@@ -110,7 +110,7 @@ pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// # Errors
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
-/// `value` contains a non-finite float or an integer outside
+/// `value` contains a non-finite float or an integer value outside
 /// ±[`MAX_SAFE_INTEGER`].
 #[inline]
 pub fn to_string<T>(value: &T) -> Result<String, Error>
@@ -130,7 +130,7 @@ where
 /// # Errors
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
-/// `value` contains a non-finite float or an integer outside
+/// `value` contains a non-finite float or an integer value outside
 /// ±[`MAX_SAFE_INTEGER`].
 #[inline]
 pub fn to_vec<T>(value: &T) -> Result<Vec<u8>, Error>
@@ -149,7 +149,7 @@ where
 /// # Errors
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
-/// `value` contains a non-finite float or an integer outside
+/// `value` contains a non-finite float or an integer value outside
 /// ±[`MAX_SAFE_INTEGER`].
 #[inline]
 pub fn to_writer<W, T>(writer: W, value: &T) -> Result<(), Error>
@@ -371,6 +371,11 @@ impl JcsFormatter {
   fn entry_mut(&mut self) -> Option<&mut Entry> {
     self.entries.last_mut()
   }
+
+  #[inline]
+  fn in_key(&self) -> bool {
+    self.entries.last().is_some_and(|entry| !entry.complete)
+  }
 }
 
 impl Formatter for JcsFormatter {
@@ -482,6 +487,10 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
+    if self.in_key() {
+      return write!(self.scope(writer), "{value}");
+    }
+
     if value.unsigned_abs() > MAX_SAFE_INTEGER {
       return Err(unsafe_integer());
     }
@@ -495,6 +504,10 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
+    if self.in_key() {
+      return write!(self.scope(writer), "{value}");
+    }
+
     if value.unsigned_abs() > u128::from(MAX_SAFE_INTEGER) {
       return Err(unsafe_integer());
     }
@@ -532,6 +545,10 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
+    if self.in_key() {
+      return write!(self.scope(writer), "{value}");
+    }
+
     if value > MAX_SAFE_INTEGER {
       return Err(unsafe_integer());
     }
@@ -545,6 +562,10 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
+    if self.in_key() {
+      return write!(self.scope(writer), "{value}");
+    }
+
     if value > u128::from(MAX_SAFE_INTEGER) {
       return Err(unsafe_integer());
     }

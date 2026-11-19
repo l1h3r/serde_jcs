@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Non-finite floats nested in arrays, objects and options return an error instead of serializing as `null`.
+- Integer map keys outside ±`MAX_SAFE_INTEGER` serialize as decimal strings instead of returning an error.
 
 ## [0.3.0] - 2026-11-19
 
