@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- `MAX_SAFE_INTEGER`.
+
+### Changed
+
+- Integers outside ±`MAX_SAFE_INTEGER` return an error (#3).
+
+### Fixed
+
+- `i128` and `u128` within that range serialize instead of returning an error.
+
 ## [0.2.0] - 2026-03-25
 
 ### Changed
