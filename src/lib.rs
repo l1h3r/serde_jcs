@@ -1,9 +1,15 @@
-//! JSON Canonicalization Scheme (JCS)
+//! JSON Canonicalization Scheme ([RFC 8785]) for [Serde].
 //!
-//! ### References
+//! ```
+//! use serde_jcs::to_string;
+//! use serde_json::json;
 //!
-//! [RFC 8785](https://tools.ietf.org/html/rfc8785)
+//! let value = json!({ "b": [1.50, "\u{20ac}"], "a": null });
+//! assert_eq!(to_string(&value).unwrap(), r#"{"a":null,"b":[1.5,"€"]}"#);
+//! ```
 //!
+//! [RFC 8785]: https://www.rfc-editor.org/rfc/rfc8785
+//! [Serde]: ::serde
 
 use ryu_js::Buffer;
 use serde::Serialize;
@@ -20,14 +26,13 @@ use std::io;
 use std::io::Write;
 use std::mem::take;
 
-/// The largest integer magnitude that can be serialized, `2^53 - 1`.
+/// The largest integer magnitude that can be serialized as a JSON number,
+/// `2^53 - 1`.
 ///
 /// Equal to ECMAScript's `Number.MAX_SAFE_INTEGER`.
 pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
-/// Serialize the given value as a String of JSON.
-///
-/// Serialization is performed as specified in [RFC 8785](https://tools.ietf.org/html/rfc8785).
+/// Serializes `value` as a canonical JSON [`String`].
 ///
 /// # Errors
 ///
@@ -47,9 +52,7 @@ where
   Ok(data)
 }
 
-/// Serialize the given value as a JSON byte vector.
-///
-/// Serialization is performed as specified in [RFC 8785](https://tools.ietf.org/html/rfc8785).
+/// Serializes `value` as canonical JSON bytes.
 ///
 /// # Errors
 ///
@@ -68,9 +71,7 @@ where
   Ok(data)
 }
 
-/// Serialize the given value as JSON into the IO stream.
-///
-/// Serialization is performed as specified in [RFC 8785](https://tools.ietf.org/html/rfc8785).
+/// Serializes `value` as canonical JSON into `writer`.
 ///
 /// # Errors
 ///
