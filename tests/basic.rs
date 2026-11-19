@@ -122,3 +122,18 @@ fn test_rfc_appendix_i_weird() {
     include_str!("testdata/output/weird.json"),
   );
 }
+
+// Raw JSON rejection vectors are outside this test: serde_jcs serializes Rust values but has no
+// public raw JSON parser (src/lib.rs).
+#[test]
+fn test_rfc_es6_numbers() {
+  for case in include_str!("testdata/numbers.jsonl").lines() {
+    let case: Value = from_str(case).unwrap();
+    let id = case["id"].as_str().unwrap();
+    let bits = u64::from_str_radix(case["bits"].as_str().unwrap(), 16).unwrap();
+    let expected = case["expected"].as_str().unwrap();
+    let received = to_string(&f64::from_bits(bits)).unwrap();
+
+    assert_eq!(received, expected, "{id}");
+  }
+}
