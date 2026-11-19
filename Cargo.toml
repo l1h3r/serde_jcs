@@ -6,7 +6,6 @@ categories = ["encoding"]
 description = "JSON Canonicalization Scheme (JCS) for Serde"
 documentation = "https://docs.rs/serde_jcs"
 edition = "2024"
-homepage = "https://github.com/l1h3r/serde_jcs"
 keywords = ["json", "serde", "serialization"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
