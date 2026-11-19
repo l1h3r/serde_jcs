@@ -5,14 +5,20 @@
 [![docs.rs][shield-img-docs]][shield-url-docs]
 [![build status][shield-img-ci]][shield-url-ci]
 
-**JSON Canonicalization Scheme (JCS) for Serde**
+JSON Canonicalization Scheme (JCS) for Serde.
+
+**serde_jcs** serializes [Serde][ref-url-serde] data to the canonical JSON form defined by [RFC 8785][ref-url-rfc8785].
 
 ---
 
-## References
+## Usage
 
-- [RFC 8785](https://tools.ietf.org/html/rfc8785)
-- [`serde`](https://crates.io/crates/serde)
+Add the following to your `Cargo.toml`:
+
+```toml
+[dependencies]
+serde_jcs = "0.3"
+```
 
 <br>
 
@@ -41,3 +47,8 @@
 
 [shield-url-ci]: https://github.com/l1h3r/serde_jcs/actions/workflows/ci.yml?query=branch:main
 [shield-img-ci]: https://img.shields.io/github/actions/workflow/status/l1h3r/serde_jcs/ci.yml?style=flat-square
+
+[//]: # (refs)
+
+[ref-url-serde]: https://serde.rs
+[ref-url-rfc8785]: https://www.rfc-editor.org/rfc/rfc8785
