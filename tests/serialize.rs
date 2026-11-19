@@ -136,6 +136,22 @@ fn test_string_escapes() {
 }
 
 #[test]
+fn test_keys_integer() {
+  assert_json(map([(10, 1), (9, 2)]), r#"{"10":1,"9":2}"#);
+  assert_json(map([(i64::MIN, 1)]), r#"{"-9223372036854775808":1}"#);
+  assert_json(map([(u64::MAX, 1)]), r#"{"18446744073709551615":1}"#);
+  assert_json(
+    map([(i128::MIN, 1)]),
+    r#"{"-170141183460469231731687303715884105728":1}"#,
+  );
+  assert_json(
+    map([(u128::MAX, 1)]),
+    r#"{"340282366920938463463374607431768211455":1}"#,
+  );
+  assert_json_err(map([("a", u64::MAX)]), UNSAFE_INTEGER);
+}
+
+#[test]
 fn test_keys_other() {
   assert_json(map([(true, 1)]), r#"{"true":1}"#);
   assert_json(map([('x', 1)]), r#"{"x":1}"#);
