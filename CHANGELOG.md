@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking:** Duplicate object property names return an error.
+- **Breaking:** Non-finite floats return a data error instead of an I/O error.
+
+### Fixed
+
+- Non-finite floats nested in arrays, objects and options return an error instead of serializing as `null`.
 
 ## [0.3.0] - 2026-11-19
 
