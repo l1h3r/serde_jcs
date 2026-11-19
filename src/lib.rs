@@ -93,6 +93,11 @@ where
 // -----------------------------------------------------------------------------
 
 #[inline]
+fn duplicate_key() -> io::Error {
+  io::Error::other("duplicate object key")
+}
+
+#[inline]
 fn invalid_float() -> io::Error {
   io::Error::other("invalid float value")
 }
@@ -553,7 +558,9 @@ impl Formatter for JcsFormatter {
     let key: Vec<u8> = take(&mut entry.next_key);
     let val: Vec<u8> = take(&mut entry.next_val);
 
-    entry.object.insert(Utf16Key::new(key)?, val);
+    if entry.object.insert(Utf16Key::new(key)?, val).is_some() {
+      return Err(duplicate_key());
+    }
 
     Ok(())
   }
