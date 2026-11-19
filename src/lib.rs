@@ -13,6 +13,14 @@
 
 use ryu_js::Buffer;
 use serde::Serialize;
+use serde::ser::Error as _;
+use serde::ser::SerializeMap;
+use serde::ser::SerializeSeq;
+use serde::ser::SerializeStruct;
+use serde::ser::SerializeStructVariant;
+use serde::ser::SerializeTuple;
+use serde::ser::SerializeTupleStruct;
+use serde::ser::SerializeTupleVariant;
 use serde::ser::Serializer;
 use serde_json::Error;
 use serde_json::Serializer as JsonSerializer;
@@ -26,6 +34,70 @@ use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
 use std::mem::take;
+
+macro_rules! forward {
+  ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
+    $(
+      #[inline]
+      fn $name(self, $($arg: $ty),*) -> Result<Self::Ok, Self::Error> {
+        self.0.$name($($arg),*)
+      }
+    )*
+  };
+}
+
+macro_rules! forward_float {
+  ($($name:ident($ty:ty);)*) => {
+    $(
+      #[inline]
+      fn $name(self, value: $ty) -> Result<Self::Ok, Self::Error> {
+        if value.is_finite() {
+          self.0.$name(value)
+        } else {
+          Err(Self::Error::custom(invalid_float()))
+        }
+      }
+    )*
+  };
+}
+
+macro_rules! forward_compound {
+  ($($name:ident($($arg:ident: $ty:ty),*) -> $assoc:ident;)*) => {
+    $(
+      #[inline]
+      fn $name(self, $($arg: $ty),*) -> Result<Self::$assoc, Self::Error> {
+        self.0.$name($($arg),*).map(JcsSerializer)
+      }
+    )*
+  };
+}
+
+macro_rules! forward_element {
+  ($($trait:ident::$method:ident($($arg:ident: $ty:ty),*);)*) => {
+    $(
+      impl<S> $trait for JcsSerializer<S>
+      where
+        S: $trait,
+      {
+        type Ok = S::Ok;
+        type Error = S::Error;
+
+        #[inline]
+        fn $method<T>(&mut self, $($arg: $ty,)* value: &T) -> Result<(), Self::Error>
+        where
+          T: Serialize + ?Sized,
+        {
+          self.0.$method($($arg,)* &JcsValue(value))
+        }
+
+        #[inline]
+        fn end(self) -> Result<Self::Ok, Self::Error> {
+          self.0.end()
+        }
+      }
+    )*
+  };
+}
 
 /// The largest integer magnitude that can be serialized as a JSON number,
 /// `2^53 - 1`.
@@ -85,7 +157,10 @@ where
   W: Write,
   T: Serialize + ?Sized,
 {
-  value.serialize(&mut JcsSerializer::new(writer))
+  let mut serializer: JsonSerializer<W, JcsFormatter> =
+    JsonSerializer::with_formatter(writer, JcsFormatter::new());
+
+  JcsValue(value).serialize(&mut serializer)
 }
 
 // -----------------------------------------------------------------------------
@@ -567,163 +642,98 @@ impl Formatter for JcsFormatter {
 }
 
 // -----------------------------------------------------------------------------
+// JSON Value
+// -----------------------------------------------------------------------------
+
+struct JcsValue<'a, T>(&'a T)
+where
+  T: ?Sized;
+
+impl<T> Serialize for JcsValue<'_, T>
+where
+  T: Serialize + ?Sized,
+{
+  #[inline]
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    self.0.serialize(JcsSerializer(serializer))
+  }
+}
+
+// -----------------------------------------------------------------------------
 // JSON Serializer
 // -----------------------------------------------------------------------------
 
-type Proxy<'a, W> = &'a mut JsonSerializer<W, JcsFormatter>;
+struct JcsSerializer<S>(S);
 
-struct JcsSerializer<W> {
-  inner: JsonSerializer<W, JcsFormatter>,
-}
-
-impl<W> JcsSerializer<W> {
-  #[inline]
-  fn new(writer: W) -> Self
-  where
-    W: Write,
-  {
-    Self {
-      inner: JsonSerializer::with_formatter(writer, JcsFormatter::new()),
-    }
-  }
-}
-
-impl<'a, W> Serializer for &'a mut JcsSerializer<W>
+impl<S> Serializer for JcsSerializer<S>
 where
-  W: Write,
+  S: Serializer,
 {
-  type Ok = <Proxy<'a, W> as Serializer>::Ok;
-  type Error = <Proxy<'a, W> as Serializer>::Error;
+  type Ok = S::Ok;
+  type Error = S::Error;
+  type SerializeSeq = JcsSerializer<S::SerializeSeq>;
+  type SerializeTuple = JcsSerializer<S::SerializeTuple>;
+  type SerializeTupleStruct = JcsSerializer<S::SerializeTupleStruct>;
+  type SerializeTupleVariant = JcsSerializer<S::SerializeTupleVariant>;
+  type SerializeMap = JcsSerializer<S::SerializeMap>;
+  type SerializeStruct = JcsSerializer<S::SerializeStruct>;
+  type SerializeStructVariant = JcsSerializer<S::SerializeStructVariant>;
 
-  type SerializeSeq = <Proxy<'a, W> as Serializer>::SerializeSeq;
-  type SerializeTuple = <Proxy<'a, W> as Serializer>::SerializeTuple;
-  type SerializeTupleStruct = <Proxy<'a, W> as Serializer>::SerializeTupleStruct;
-  type SerializeTupleVariant = <Proxy<'a, W> as Serializer>::SerializeTupleVariant;
-  type SerializeMap = <Proxy<'a, W> as Serializer>::SerializeMap;
-  type SerializeStruct = <Proxy<'a, W> as Serializer>::SerializeStruct;
-  type SerializeStructVariant = <Proxy<'a, W> as Serializer>::SerializeStructVariant;
-
-  #[inline]
-  fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_bool(value)
+  forward! {
+    serialize_bool(value: bool);
+    serialize_i8(value: i8);
+    serialize_i16(value: i16);
+    serialize_i32(value: i32);
+    serialize_i64(value: i64);
+    serialize_i128(value: i128);
+    serialize_u8(value: u8);
+    serialize_u16(value: u16);
+    serialize_u32(value: u32);
+    serialize_u64(value: u64);
+    serialize_u128(value: u128);
+    serialize_char(value: char);
+    serialize_str(value: &str);
+    serialize_bytes(value: &[u8]);
+    serialize_none();
+    serialize_unit();
+    serialize_unit_struct(name: &'static str);
+    serialize_unit_variant(name: &'static str, index: u32, variant: &'static str);
   }
 
-  #[inline]
-  fn serialize_i8(self, value: i8) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_i8(value)
+  forward_float! {
+    serialize_f32(f32);
+    serialize_f64(f64);
   }
 
-  #[inline]
-  fn serialize_i16(self, value: i16) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_i16(value)
-  }
-
-  #[inline]
-  fn serialize_i32(self, value: i32) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_i32(value)
-  }
-
-  #[inline]
-  fn serialize_i64(self, value: i64) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_i64(value)
-  }
-
-  #[inline]
-  fn serialize_i128(self, value: i128) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_i128(value)
-  }
-
-  #[inline]
-  fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_u8(value)
-  }
-
-  #[inline]
-  fn serialize_u16(self, value: u16) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_u16(value)
-  }
-
-  #[inline]
-  fn serialize_u32(self, value: u32) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_u32(value)
-  }
-
-  #[inline]
-  fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_u64(value)
-  }
-
-  #[inline]
-  fn serialize_u128(self, value: u128) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_u128(value)
-  }
-
-  #[inline]
-  fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
-    if value.is_finite() {
-      self.inner.serialize_f32(value)
-    } else {
-      Err(Self::Error::io(invalid_float()))
-    }
-  }
-
-  #[inline]
-  fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
-    if value.is_finite() {
-      self.inner.serialize_f64(value)
-    } else {
-      Err(Self::Error::io(invalid_float()))
-    }
-  }
-
-  #[inline]
-  fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_char(value)
-  }
-
-  #[inline]
-  fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_str(value)
-  }
-
-  #[inline]
-  fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_bytes(value)
-  }
-
-  #[inline]
-  fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_none()
+  forward_compound! {
+    serialize_seq(len: Option<usize>) -> SerializeSeq;
+    serialize_tuple(len: usize) -> SerializeTuple;
+    serialize_tuple_struct(name: &'static str, len: usize) -> SerializeTupleStruct;
+    serialize_tuple_variant(
+      name: &'static str,
+      index: u32,
+      variant: &'static str,
+      len: usize
+    ) -> SerializeTupleVariant;
+    serialize_map(len: Option<usize>) -> SerializeMap;
+    serialize_struct(name: &'static str, len: usize) -> SerializeStruct;
+    serialize_struct_variant(
+      name: &'static str,
+      index: u32,
+      variant: &'static str,
+      len: usize
+    ) -> SerializeStructVariant;
   }
 
   #[inline]
   fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
   where
-    T: ?Sized + Serialize,
+    T: Serialize + ?Sized,
   {
-    self.inner.serialize_some(value)
-  }
-
-  #[inline]
-  fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_unit()
-  }
-
-  #[inline]
-  fn serialize_unit_struct(self, name: &'static str) -> Result<Self::Ok, Self::Error> {
-    self.inner.serialize_unit_struct(name)
-  }
-
-  #[inline]
-  fn serialize_unit_variant(
-    self,
-    name: &'static str,
-    variant_index: u32,
-    variant: &'static str,
-  ) -> Result<Self::Ok, Self::Error> {
-    self
-      .inner
-      .serialize_unit_variant(name, variant_index, variant)
+    self.0.serialize_some(&JcsValue(value))
   }
 
   #[inline]
@@ -733,83 +743,67 @@ where
     value: &T,
   ) -> Result<Self::Ok, Self::Error>
   where
-    T: ?Sized + Serialize,
+    T: Serialize + ?Sized,
   {
-    self.inner.serialize_newtype_struct(name, value)
+    self.0.serialize_newtype_struct(name, &JcsValue(value))
   }
 
   #[inline]
   fn serialize_newtype_variant<T>(
     self,
     name: &'static str,
-    variant_index: u32,
+    index: u32,
     variant: &'static str,
     value: &T,
   ) -> Result<Self::Ok, Self::Error>
   where
-    T: ?Sized + Serialize,
+    T: Serialize + ?Sized,
   {
     self
-      .inner
-      .serialize_newtype_variant(name, variant_index, variant, value)
+      .0
+      .serialize_newtype_variant(name, index, variant, &JcsValue(value))
   }
 
   #[inline]
-  fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
-    self.inner.serialize_seq(len)
+  fn is_human_readable(&self) -> bool {
+    self.0.is_human_readable()
+  }
+}
+
+forward_element! {
+  SerializeSeq::serialize_element();
+  SerializeTuple::serialize_element();
+  SerializeTupleStruct::serialize_field();
+  SerializeTupleVariant::serialize_field();
+  SerializeStruct::serialize_field(key: &'static str);
+  SerializeStructVariant::serialize_field(key: &'static str);
+}
+
+impl<S> SerializeMap for JcsSerializer<S>
+where
+  S: SerializeMap,
+{
+  type Ok = S::Ok;
+  type Error = S::Error;
+
+  #[inline]
+  fn serialize_key<T>(&mut self, key: &T) -> Result<(), Self::Error>
+  where
+    T: Serialize + ?Sized,
+  {
+    self.0.serialize_key(&JcsValue(key))
   }
 
   #[inline]
-  fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
-    self.inner.serialize_tuple(len)
+  fn serialize_value<T>(&mut self, value: &T) -> Result<(), Self::Error>
+  where
+    T: Serialize + ?Sized,
+  {
+    self.0.serialize_value(&JcsValue(value))
   }
 
   #[inline]
-  fn serialize_tuple_struct(
-    self,
-    name: &'static str,
-    len: usize,
-  ) -> Result<Self::SerializeTupleStruct, Self::Error> {
-    self.inner.serialize_tuple_struct(name, len)
-  }
-
-  #[inline]
-  fn serialize_tuple_variant(
-    self,
-    name: &'static str,
-    variant_index: u32,
-    variant: &'static str,
-    len: usize,
-  ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-    self
-      .inner
-      .serialize_tuple_variant(name, variant_index, variant, len)
-  }
-
-  #[inline]
-  fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
-    self.inner.serialize_map(len)
-  }
-
-  #[inline]
-  fn serialize_struct(
-    self,
-    name: &'static str,
-    len: usize,
-  ) -> Result<Self::SerializeStruct, Self::Error> {
-    self.inner.serialize_struct(name, len)
-  }
-
-  #[inline]
-  fn serialize_struct_variant(
-    self,
-    name: &'static str,
-    variant_index: u32,
-    variant: &'static str,
-    len: usize,
-  ) -> Result<Self::SerializeStructVariant, Self::Error> {
-    self
-      .inner
-      .serialize_struct_variant(name, variant_index, variant, len)
+  fn end(self) -> Result<Self::Ok, Self::Error> {
+    self.0.end()
   }
 }
