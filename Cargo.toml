@@ -8,10 +8,9 @@ documentation = "https://docs.rs/serde_jcs"
 edition = "2024"
 keywords = ["json", "serde", "serialization"]
 license = "MIT OR Apache-2.0"
-readme = "README.md"
 repository = "https://github.com/l1h3r/serde_jcs"
 rust-version = "1.85"
-exclude = [".github", "release.toml", "rustfmt.toml"]
+exclude = [".github", "release.toml", "rustfmt.toml", "tests"]
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
@@ -48,6 +47,18 @@ rust_2018_idioms = { level = "deny", priority = -1 }
 rust_2021_compatibility = { level = "deny", priority = -1 }
 rust_2024_compatibility = { level = "deny", priority = -1 }
 unused = { level = "deny", priority = -1 }
+
+# ------------------------------------------------------------------------------
+# Cargo Lints
+# https://doc.rust-lang.org/stable/cargo/reference/lints.html
+# ------------------------------------------------------------------------------
+
+[lints.cargo]
+correctness = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+restriction = { level = "allow", priority = -1 }
 
 # ------------------------------------------------------------------------------
 # Clippy Lints
