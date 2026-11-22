@@ -22,7 +22,7 @@ use serde::ser::SerializeTupleStruct;
 use serde::ser::SerializeTupleVariant;
 use serde::ser::Serializer;
 use serde_json::Deserializer as JsonDeserializer;
-use serde_json::Error;
+use serde_json::Error as JsonError;
 use serde_json::Serializer as JsonSerializer;
 use serde_json::ser::CharEscape;
 use serde_json::ser::CompactFormatter;
@@ -32,6 +32,10 @@ use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Iter as BTreeIter;
+use std::error::Error as StdError;
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::fmt::Result as FmtResult;
 use std::io;
 use std::io::Write;
 use std::mem::take;
@@ -56,7 +60,7 @@ const NUMBER_TOKEN: &[u8] = b"\"$serde_json::private::Number\"";
 /// - `value` contains a duplicate object key.
 /// - `value` contains an integer that serializes differently as an [`f64`].
 #[inline]
-pub fn to_string<T>(value: &T) -> Result<String, Error>
+pub fn to_string<T>(value: &T) -> Result<String, JsonError>
 where
   T: Serialize + ?Sized,
 {
@@ -79,7 +83,7 @@ where
 /// - `value` contains a duplicate object key.
 /// - `value` contains an integer that serializes differently as an [`f64`].
 #[inline]
-pub fn to_vec<T>(value: &T) -> Result<Vec<u8>, Error>
+pub fn to_vec<T>(value: &T) -> Result<Vec<u8>, JsonError>
 where
   T: Serialize + ?Sized,
 {
@@ -101,7 +105,7 @@ where
 /// - `value` contains a duplicate object key.
 /// - `value` contains an integer that serializes differently as an [`f64`].
 #[inline]
-pub fn to_writer<W, T>(writer: W, value: &T) -> Result<(), Error>
+pub fn to_writer<W, T>(writer: W, value: &T) -> Result<(), JsonError>
 where
   W: Write,
   T: Serialize + ?Sized,
@@ -109,10 +113,12 @@ where
   let mut serializer: JsonSerializer<W, JcsFormatter> = JcsFormatter::serializer(writer, false);
   let failed: Cell<bool> = Cell::new(false);
 
-  JcsValue(value, &failed).serialize(&mut serializer)?;
+  JcsValue(value, &failed)
+    .serialize(&mut serializer)
+    .map_err(reclassify)?;
 
   if failed.get() {
-    return Err(Error::custom("an error was ignored"));
+    return Err(JsonError::custom("an error was ignored"));
   }
 
   Ok(())
@@ -122,34 +128,68 @@ where
 // Errors
 // -----------------------------------------------------------------------------
 
-#[inline]
-fn duplicate_key() -> io::Error {
-  io::Error::other("duplicate object key")
+// serde_json reports every formatter error as an I/O error.
+#[derive(Debug)]
+struct Error(String);
+
+impl Error {
+  #[inline]
+  fn io(message: impl Into<String>) -> io::Error {
+    io::Error::other(Self(message.into()))
+  }
+
+  #[inline]
+  fn duplicate_key() -> io::Error {
+    Self::io("duplicate object key")
+  }
+
+  #[inline]
+  fn incomplete_entry() -> io::Error {
+    Self::io("object entry left incomplete by an earlier error")
+  }
+
+  #[inline]
+  fn invalid_float() -> io::Error {
+    Self::io("invalid float value")
+  }
+
+  #[inline]
+  fn invalid_key() -> io::Error {
+    Self::io("invalid UTF-8 key")
+  }
+
+  #[inline]
+  fn missing_object(event: &str) -> io::Error {
+    Self::io(format!("{event} called before begin_object"))
+  }
+
+  #[inline]
+  fn unsafe_integer() -> io::Error {
+    Self::io("integer outside safe range")
+  }
 }
 
-#[inline]
-fn incomplete_entry() -> io::Error {
-  io::Error::other("object entry left incomplete by an earlier error")
+impl Display for Error {
+  fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    f.write_str(&self.0)
+  }
 }
 
-#[inline]
-fn invalid_float() -> io::Error {
-  io::Error::other("invalid float value")
-}
+impl StdError for Error {}
 
 #[inline]
-fn invalid_key() -> io::Error {
-  io::Error::other("invalid UTF-8 key")
-}
+fn reclassify(error: JsonError) -> JsonError {
+  if !error.is_io() {
+    return error;
+  }
 
-#[inline]
-fn missing_object(event: &str) -> io::Error {
-  io::Error::other(format!("{event} called before begin_object"))
-}
-
-#[inline]
-fn unsafe_integer() -> io::Error {
-  io::Error::other("integer outside safe range")
+  match io::Error::from(error).downcast::<Error>() {
+    Ok(error) => JsonError::custom(error),
+    Err(error) => match error.downcast::<JsonError>() {
+      Ok(error) => error,
+      Err(error) => JsonError::io(error),
+    },
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -223,7 +263,7 @@ impl JcsFormatter {
     if self.in_key() || magnitude <= u128::from(MAX_SAFE_INTEGER) || round_trips(magnitude) {
       Ok(())
     } else {
-      Err(unsafe_integer())
+      Err(Error::unsafe_integer())
     }
   }
 }
@@ -256,7 +296,7 @@ impl JsonFormatter for JcsFormatter {
       return self.write_f64(writer, value.parse().map_err(io::Error::other)?);
     }
 
-    self.write_i128(writer, value.parse().map_err(|_| unsafe_integer())?)
+    self.write_i128(writer, value.parse().map_err(|_| Error::unsafe_integer())?)
   }
 
   #[inline]
@@ -337,7 +377,7 @@ impl JsonFormatter for JcsFormatter {
         .scope(writer)
         .write_all(buffer.format_finite(value).as_bytes())
     } else {
-      Err(invalid_float())
+      Err(Error::invalid_float())
     }
   }
 
@@ -359,10 +399,10 @@ impl JsonFormatter for JcsFormatter {
     let entry: Entry = self
       .entries
       .pop()
-      .ok_or_else(|| missing_object("end_object"))?;
+      .ok_or_else(|| Error::missing_object("end_object"))?;
 
     if entry.is_pending() {
-      return Err(incomplete_entry());
+      return Err(Error::incomplete_entry());
     }
 
     if self.fragment {
@@ -397,10 +437,10 @@ impl JsonFormatter for JcsFormatter {
   {
     let entry: &mut Entry = self
       .entry_mut()
-      .ok_or_else(|| missing_object("begin_object_key"))?;
+      .ok_or_else(|| Error::missing_object("begin_object_key"))?;
 
     if entry.is_pending() {
-      return Err(incomplete_entry());
+      return Err(Error::incomplete_entry());
     }
 
     entry.complete(false);
@@ -415,7 +455,7 @@ impl JsonFormatter for JcsFormatter {
   {
     self
       .entry_mut()
-      .ok_or_else(|| missing_object("end_object_key"))
+      .ok_or_else(|| Error::missing_object("end_object_key"))
       .map(|entry| entry.complete(true))
   }
 
@@ -434,13 +474,13 @@ impl JsonFormatter for JcsFormatter {
   {
     let entry: &mut Entry = self
       .entry_mut()
-      .ok_or_else(|| missing_object("end_object_value"))?;
+      .ok_or_else(|| Error::missing_object("end_object_value"))?;
 
     let key: Vec<u8> = take(&mut entry.next_key);
     let val: Vec<u8> = take(&mut entry.next_val);
 
     if entry.object.insert(EntryKey::new(key)?, val).is_some() {
-      return Err(duplicate_key());
+      return Err(Error::duplicate_key());
     }
 
     Ok(())
@@ -566,12 +606,12 @@ impl EntryKey {
       }
     }
 
-    let mut text: &str = unquote(&key).ok_or_else(invalid_key)?;
+    let mut text: &str = unquote(&key).ok_or_else(Error::invalid_key)?;
 
     let mut tag: Vec<u16> = Vec::with_capacity(text.len());
 
     while let Some((head, tail)) = text.split_once('\\') {
-      let (unit, tail): (u16, &str) = unescape(tail).ok_or_else(invalid_key)?;
+      let (unit, tail): (u16, &str) = unescape(tail).ok_or_else(Error::invalid_key)?;
 
       tag.extend(head.encode_utf16());
       tag.push(unit);
@@ -678,7 +718,7 @@ macro_rules! forward_float {
         if value.is_finite() {
           self.0.$name(value)
         } else {
-          Err(<Self::Error as ::serde::ser::Error>::custom($crate::invalid_float()))
+          Err(<Self::Error as ::serde::ser::Error>::custom($crate::Error::invalid_float()))
         }
       }
     )*

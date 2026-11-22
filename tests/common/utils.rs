@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_jcs::to_string;
 use serde_json::Error;
 use serde_json::Value;
+use serde_json::error::Category;
 use serde_json::from_str;
 use serde_json::value::RawValue;
 
@@ -45,6 +46,14 @@ where
   T: Serialize,
 {
   assert_error(&to_string(&input).unwrap_err(), message);
+}
+
+#[track_caller]
+pub(crate) fn assert_json_category<T>(input: T, expected: Category)
+where
+  T: Serialize,
+{
+  assert_eq!(to_string(&input).unwrap_err().classify(), expected);
 }
 
 #[track_caller]

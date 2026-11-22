@@ -9,6 +9,7 @@ use serde_jcs::to_vec;
 use serde_jcs::to_writer;
 use serde_json::Error;
 use serde_json::Value;
+use serde_json::error::Category;
 use serde_json::value::RawValue;
 use std::collections::BTreeMap;
 
@@ -27,6 +28,7 @@ use crate::utils::NON_STRING_KEY;
 use crate::utils::UNSAFE_INTEGER;
 use crate::utils::assert_error;
 use crate::utils::assert_json;
+use crate::utils::assert_json_category;
 use crate::utils::assert_json_err;
 use crate::utils::raw;
 use crate::utils::value;
@@ -308,7 +310,22 @@ fn test_output_writer_error() {
     let received: Error = to_writer(FailWriter(limit), &input).unwrap_err();
 
     assert_error(&received, WRITE_FAILED);
+    assert_eq!(received.classify(), Category::Io);
   }
 
   assert!(to_writer(FailWriter(length), &input).is_ok());
+}
+
+#[test]
+fn test_error_categories() {
+  let duplicate: Entries<&str, u8, 2> = Entries([("a", 1), ("a", 2)]);
+
+  assert_json_category(f64::NAN, Category::Data);
+  assert_json_category(u64::MAX, Category::Data);
+  assert_json_category(duplicate, Category::Data);
+  assert_json_category(IgnoredElement, Category::Data);
+  assert_json_category(IgnoredError { next_key: true }, Category::Data);
+  assert_json_category(raw("[1e400]"), Category::Data);
+  assert_json_category(raw("[9007199254740993]"), Category::Data);
+  assert_json_category(raw(r#"{"a":1,"a":2}"#), Category::Data);
 }
