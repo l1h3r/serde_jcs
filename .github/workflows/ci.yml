@@ -31,6 +31,8 @@ jobs:
         with:
           toolchain: ${{matrix.rust}}
       - run: cargo test
+      - run: cargo test --features serde_json/arbitrary_precision
+      - run: cargo test --features serde_json/preserve_order
 
   msrv:
     name: Rust 1.85.0

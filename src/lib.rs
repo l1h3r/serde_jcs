@@ -21,33 +21,40 @@ use serde::ser::SerializeTuple;
 use serde::ser::SerializeTupleStruct;
 use serde::ser::SerializeTupleVariant;
 use serde::ser::Serializer;
+use serde_json::Deserializer as JsonDeserializer;
 use serde_json::Error;
 use serde_json::Serializer as JsonSerializer;
-use serde_json::Value as JsonValue;
-use serde_json::from_str;
 use serde_json::ser::CharEscape;
 use serde_json::ser::CompactFormatter;
 use serde_json::ser::Formatter as JsonFormatter;
+use serde_transcode::transcode;
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Iter as BTreeIter;
 use std::io;
 use std::io::Write;
 use std::mem::take;
 use std::str::from_utf8;
 
-/// The largest integer magnitude that can be serialized as a JSON number,
-/// `2^53 - 1`.
+/// The largest integer magnitude that always serializes, `2^53 - 1`.
 ///
 /// Equal to ECMAScript's `Number.MAX_SAFE_INTEGER`.
 pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+// The key serde_json uses for numbers under `arbitrary_precision`.
+const NUMBER_TOKEN: &[u8] = b"\"$serde_json::private::Number\"";
 
 /// Serializes `value` as a canonical JSON [`String`].
 ///
 /// # Errors
 ///
-/// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
-/// `value` contains a non-finite float, a duplicate object key, or an integer
-/// value outside ±[`MAX_SAFE_INTEGER`].
+/// Returns an error if:
+///
+/// - `T`'s implementation of `Serialize` fails or ignores an error.
+/// - `value` contains a non-finite float.
+/// - `value` contains a duplicate object key.
+/// - `value` contains an integer that serializes differently as an [`f64`].
 #[inline]
 pub fn to_string<T>(value: &T) -> Result<String, Error>
 where
@@ -65,9 +72,12 @@ where
 ///
 /// # Errors
 ///
-/// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
-/// `value` contains a non-finite float, a duplicate object key, or an integer
-/// value outside ±[`MAX_SAFE_INTEGER`].
+/// Returns an error if:
+///
+/// - `T`'s implementation of `Serialize` fails or ignores an error.
+/// - `value` contains a non-finite float.
+/// - `value` contains a duplicate object key.
+/// - `value` contains an integer that serializes differently as an [`f64`].
 #[inline]
 pub fn to_vec<T>(value: &T) -> Result<Vec<u8>, Error>
 where
@@ -84,19 +94,28 @@ where
 ///
 /// # Errors
 ///
-/// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
-/// `value` contains a non-finite float, a duplicate object key, or an integer
-/// value outside ±[`MAX_SAFE_INTEGER`].
+/// Returns an error if:
+///
+/// - `T`'s implementation of `Serialize` fails or ignores an error.
+/// - `value` contains a non-finite float.
+/// - `value` contains a duplicate object key.
+/// - `value` contains an integer that serializes differently as an [`f64`].
 #[inline]
 pub fn to_writer<W, T>(writer: W, value: &T) -> Result<(), Error>
 where
   W: Write,
   T: Serialize + ?Sized,
 {
-  let mut serializer: JsonSerializer<W, JcsFormatter> =
-    JsonSerializer::with_formatter(writer, JcsFormatter::new());
+  let mut serializer: JsonSerializer<W, JcsFormatter> = JcsFormatter::serializer(writer, false);
+  let failed: Cell<bool> = Cell::new(false);
 
-  JcsValue(value).serialize(&mut serializer)
+  JcsValue(value, &failed).serialize(&mut serializer)?;
+
+  if failed.get() {
+    return Err(Error::custom("an error was ignored"));
+  }
+
+  Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -106,6 +125,11 @@ where
 #[inline]
 fn duplicate_key() -> io::Error {
   io::Error::other("duplicate object key")
+}
+
+#[inline]
+fn incomplete_entry() -> io::Error {
+  io::Error::other("object entry left incomplete by an earlier error")
 }
 
 #[inline]
@@ -136,11 +160,15 @@ macro_rules! forward_scope {
   ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
     $(
       #[inline]
-      fn $name<W>(&mut self, writer: &mut W, $($arg: $ty),*) -> io::Result<()>
+      fn $name<W>(&mut self, writer: &mut W, $($arg: $ty),*) -> ::std::io::Result<()>
       where
-        W: Write + ?Sized,
+        W: ::std::io::Write + ?Sized,
       {
-        CompactFormatter.$name(&mut self.scope(writer), $($arg),*)
+        ::serde_json::ser::Formatter::$name(
+          &mut ::serde_json::ser::CompactFormatter,
+          &mut self.scope(writer),
+          $($arg),*
+        )
       }
     )*
   };
@@ -148,14 +176,24 @@ macro_rules! forward_scope {
 
 struct JcsFormatter {
   entries: Vec<Entry>,
+  fragment: bool,
 }
 
 impl JcsFormatter {
   #[inline]
-  const fn new() -> Self {
+  const fn new(fragment: bool) -> Self {
     Self {
       entries: Vec::new(),
+      fragment,
     }
+  }
+
+  #[inline]
+  fn serializer<W>(writer: W, fragment: bool) -> JsonSerializer<W, Self>
+  where
+    W: Write,
+  {
+    JsonSerializer::with_formatter(writer, Self::new(fragment))
   }
 
   #[inline]
@@ -182,7 +220,7 @@ impl JcsFormatter {
 
   #[inline]
   fn check_integer(&self, magnitude: u128) -> io::Result<()> {
-    if self.in_key() || magnitude <= u128::from(MAX_SAFE_INTEGER) {
+    if self.in_key() || magnitude <= u128::from(MAX_SAFE_INTEGER) || round_trips(magnitude) {
       Ok(())
     } else {
       Err(unsafe_integer())
@@ -214,7 +252,11 @@ impl JsonFormatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    self.write_f64(writer, value.parse().map_err(io::Error::other)?)
+    if value.contains(['.', 'e', 'E']) {
+      return self.write_f64(writer, value.parse().map_err(io::Error::other)?);
+    }
+
+    self.write_i128(writer, value.parse().map_err(|_| unsafe_integer())?)
   }
 
   #[inline]
@@ -222,10 +264,12 @@ impl JsonFormatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    let mut scope: Scope<'_, W> = self.scope(writer);
-    let value: JsonValue = from_str(fragment)?;
+    let mut serializer: JsonSerializer<_, Self> = Self::serializer(self.scope(writer), true);
+    let mut deserializer: JsonDeserializer<_> = JsonDeserializer::from_str(fragment);
 
-    to_writer(&mut scope as &mut dyn Write, &value).map_err(Into::into)
+    transcode(&mut deserializer, &mut serializer)?;
+
+    deserializer.end().map_err(Into::into)
   }
 
   #[inline]
@@ -317,6 +361,16 @@ impl JsonFormatter for JcsFormatter {
       .pop()
       .ok_or_else(|| missing_object("end_object"))?;
 
+    if entry.is_pending() {
+      return Err(incomplete_entry());
+    }
+
+    if self.fragment {
+      if let Some(number) = entry.number() {
+        return self.write_number_str(writer, number);
+      }
+    }
+
     let mut scope: Scope<'_, W> = self.scope(writer);
 
     scope.write_all(b"{")?;
@@ -341,10 +395,17 @@ impl JsonFormatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    self
+    let entry: &mut Entry = self
       .entry_mut()
-      .ok_or_else(|| missing_object("begin_object_key"))
-      .map(|entry| entry.complete(false))
+      .ok_or_else(|| missing_object("begin_object_key"))?;
+
+    if entry.is_pending() {
+      return Err(incomplete_entry());
+    }
+
+    entry.complete(false);
+
+    Ok(())
   }
 
   #[inline]
@@ -453,6 +514,23 @@ impl Entry {
   const fn complete(&mut self, value: bool) {
     self.complete = value;
   }
+
+  #[inline]
+  fn is_pending(&self) -> bool {
+    !self.next_key.is_empty() || !self.next_val.is_empty()
+  }
+
+  #[inline]
+  fn number(&self) -> Option<&str> {
+    let mut fields: BTreeIter<'_, EntryKey, Vec<u8>> = self.object.iter();
+    let (key, val): (&EntryKey, &Vec<u8>) = fields.next()?;
+
+    if fields.next().is_some() || key.key != NUMBER_TOKEN {
+      return None;
+    }
+
+    unquote(val)
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -488,11 +566,7 @@ impl EntryKey {
       }
     }
 
-    let mut text: &str = from_utf8(&key)
-      .ok()
-      .and_then(|text| text.strip_prefix('"'))
-      .and_then(|text| text.strip_suffix('"'))
-      .ok_or_else(invalid_key)?;
+    let mut text: &str = unquote(&key).ok_or_else(invalid_key)?;
 
     let mut tag: Vec<u16> = Vec::with_capacity(text.len());
 
@@ -534,10 +608,31 @@ impl Ord for EntryKey {
 }
 
 // -----------------------------------------------------------------------------
+// JCS Formatter - Misc.
+// -----------------------------------------------------------------------------
+
+#[cold]
+fn round_trips(magnitude: u128) -> bool {
+  #[expect(clippy::cast_precision_loss, reason = "checked by the comparison")]
+  let double: f64 = magnitude as f64;
+  let mut buffer: ryu_js::Buffer = ryu_js::Buffer::new();
+
+  buffer.format_finite(double).parse() == Ok(magnitude)
+}
+
+#[inline]
+fn unquote(bytes: &[u8]) -> Option<&str> {
+  from_utf8(bytes)
+    .ok()
+    .and_then(|string| string.strip_prefix('"'))
+    .and_then(|string| string.strip_suffix('"'))
+}
+
+// -----------------------------------------------------------------------------
 // JCS Value
 // -----------------------------------------------------------------------------
 
-struct JcsValue<'a, T>(&'a T)
+struct JcsValue<'a, T>(&'a T, &'a Cell<bool>)
 where
   T: ?Sized;
 
@@ -550,7 +645,13 @@ where
   where
     S: Serializer,
   {
-    self.0.serialize(JcsSerializer(serializer))
+    let result: Result<S::Ok, S::Error> = self.0.serialize(JcsSerializer(serializer, self.1));
+
+    if result.is_err() {
+      self.1.set(true);
+    }
+
+    result
   }
 }
 
@@ -577,7 +678,7 @@ macro_rules! forward_float {
         if value.is_finite() {
           self.0.$name(value)
         } else {
-          Err(Self::Error::custom($crate::invalid_float()))
+          Err(<Self::Error as ::serde::ser::Error>::custom($crate::invalid_float()))
         }
       }
     )*
@@ -589,7 +690,7 @@ macro_rules! forward_compound {
     $(
       #[inline]
       fn $name(self, $($arg: $ty),*) -> Result<Self::$assoc, Self::Error> {
-        self.0.$name($($arg),*).map($crate::JcsSerializer)
+        self.0.$name($($arg),*).map(|inner| $crate::JcsSerializer(inner, self.1))
       }
     )*
   };
@@ -598,7 +699,7 @@ macro_rules! forward_compound {
 macro_rules! forward_element {
   ($($trait:ident::$method:ident($($arg:ident: $ty:ty),*);)*) => {
     $(
-      impl<S> $trait for $crate::JcsSerializer<S>
+      impl<S> $trait for $crate::JcsSerializer<'_, S>
       where
         S: $trait,
       {
@@ -610,7 +711,7 @@ macro_rules! forward_element {
         where
           T: ::serde::Serialize + ?Sized,
         {
-          self.0.$method($($arg,)* &JcsValue(value))
+          self.0.$method($($arg,)* &$crate::JcsValue(value, self.1))
         }
 
         #[inline]
@@ -622,21 +723,21 @@ macro_rules! forward_element {
   };
 }
 
-struct JcsSerializer<S>(S);
+struct JcsSerializer<'a, S>(S, &'a Cell<bool>);
 
-impl<S> Serializer for JcsSerializer<S>
+impl<'a, S> Serializer for JcsSerializer<'a, S>
 where
   S: Serializer,
 {
   type Ok = S::Ok;
   type Error = S::Error;
-  type SerializeSeq = JcsSerializer<S::SerializeSeq>;
-  type SerializeTuple = JcsSerializer<S::SerializeTuple>;
-  type SerializeTupleStruct = JcsSerializer<S::SerializeTupleStruct>;
-  type SerializeTupleVariant = JcsSerializer<S::SerializeTupleVariant>;
-  type SerializeMap = JcsSerializer<S::SerializeMap>;
-  type SerializeStruct = JcsSerializer<S::SerializeStruct>;
-  type SerializeStructVariant = JcsSerializer<S::SerializeStructVariant>;
+  type SerializeSeq = JcsSerializer<'a, S::SerializeSeq>;
+  type SerializeTuple = JcsSerializer<'a, S::SerializeTuple>;
+  type SerializeTupleStruct = JcsSerializer<'a, S::SerializeTupleStruct>;
+  type SerializeTupleVariant = JcsSerializer<'a, S::SerializeTupleVariant>;
+  type SerializeMap = JcsSerializer<'a, S::SerializeMap>;
+  type SerializeStruct = JcsSerializer<'a, S::SerializeStruct>;
+  type SerializeStructVariant = JcsSerializer<'a, S::SerializeStructVariant>;
 
   forward! {
     serialize_bool(value: bool);
@@ -689,7 +790,7 @@ where
   where
     T: Serialize + ?Sized,
   {
-    self.0.serialize_some(&JcsValue(value))
+    self.0.serialize_some(&JcsValue(value, self.1))
   }
 
   #[inline]
@@ -701,7 +802,9 @@ where
   where
     T: Serialize + ?Sized,
   {
-    self.0.serialize_newtype_struct(name, &JcsValue(value))
+    self
+      .0
+      .serialize_newtype_struct(name, &JcsValue(value, self.1))
   }
 
   #[inline]
@@ -717,7 +820,7 @@ where
   {
     self
       .0
-      .serialize_newtype_variant(name, index, variant, &JcsValue(value))
+      .serialize_newtype_variant(name, index, variant, &JcsValue(value, self.1))
   }
 
   #[inline]
@@ -735,7 +838,7 @@ forward_element! {
   SerializeStructVariant::serialize_field(key: &'static str);
 }
 
-impl<S> SerializeMap for JcsSerializer<S>
+impl<S> SerializeMap for JcsSerializer<'_, S>
 where
   S: SerializeMap,
 {
@@ -747,7 +850,7 @@ where
   where
     T: Serialize + ?Sized,
   {
-    self.0.serialize_key(&JcsValue(key))
+    self.0.serialize_key(&JcsValue(key, self.1))
   }
 
   #[inline]
@@ -755,7 +858,7 @@ where
   where
     T: Serialize + ?Sized,
   {
-    self.0.serialize_value(&JcsValue(value))
+    self.0.serialize_value(&JcsValue(value, self.1))
   }
 
   #[inline]

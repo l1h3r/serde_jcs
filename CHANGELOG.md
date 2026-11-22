@@ -13,11 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** Duplicate object property names return an error.
 - **Breaking:** Non-finite floats return a data error instead of an I/O error.
+- Integers outside ±`MAX_SAFE_INTEGER` that serialize the same as an `f64` no longer return an error (#3).
 
 ### Fixed
 
 - Non-finite floats nested in arrays, objects and options return an error instead of serializing as `null`.
 - Integer map keys outside ±`MAX_SAFE_INTEGER` serialize as decimal strings instead of returning an error.
+- A `Serialize` impl that ignores an error returns an error instead of producing invalid JSON.
+- With serde_json's `arbitrary_precision` feature, integers that serialize differently as an `f64` return an error instead of rounding.
+- A `RawValue` with duplicate object keys returns an error instead of keeping the last value.
 
 ## [0.3.0] - 2026-11-19
 
