@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** Duplicate object property names return an error.
-- **Breaking:** Non-finite floats return a data error instead of an I/O error.
+- **Breaking:** Duplicate object keys return a data error.
+- **Breaking:** Non-finite floats and integers that serialize differently as an `f64` return a data error instead of an I/O error.
 - Integers outside ±`MAX_SAFE_INTEGER` that serialize the same as an `f64` no longer return an error (#3).
 - Require `serde` 1.0.166 and `serde_json` 1.0.105.
 
