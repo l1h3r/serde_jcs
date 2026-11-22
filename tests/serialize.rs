@@ -1,4 +1,6 @@
 use serde::Serialize;
+use serde::Serializer;
+use serde::ser::SerializeMap as _;
 use serde_jcs::MAX_SAFE_INTEGER;
 use serde_jcs::to_string;
 use serde_jcs::to_vec;
@@ -6,6 +8,7 @@ use serde_jcs::to_writer;
 use serde_json::Error;
 use serde_json::Value;
 use serde_json::from_str;
+use serde_json::value::RawValue;
 use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
@@ -14,15 +17,14 @@ const DUPLICATE_KEY: &str = "duplicate object key";
 const INVALID_FLOAT: &str = "invalid float value";
 const NON_STRING_KEY: &str = "key must be a string";
 const UNSAFE_INTEGER: &str = "integer outside safe range";
+const WRITE_FAILED: &str = "write failed";
+
+#[derive(Serialize)]
+struct Meters(u32);
 
 #[derive(Serialize)]
 struct Field {
   x: f64,
-}
-
-#[derive(Serialize)]
-enum Variant {
-  Newtype(f64),
 }
 
 #[derive(Serialize)]
@@ -32,11 +34,76 @@ struct Flatten {
   rest: BTreeMap<&'static str, u8>,
 }
 
-struct FailWriter;
+#[derive(Serialize)]
+struct Renamed {
+  #[serde(rename = "a")]
+  z: u8,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  none: Option<u8>,
+  b: u8,
+}
+
+#[derive(Serialize)]
+struct Raw {
+  b: Box<RawValue>,
+  a: u8,
+}
+
+#[derive(Serialize)]
+enum External {
+  Unit,
+  Newtype(f64),
+  Tuple(u8, f64),
+  Struct { b: u8, a: f64 },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "t")]
+enum Internal {
+  Struct { b: u8, a: f64 },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "t", content = "c")]
+enum Adjacent {
+  Newtype(f64),
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Untagged {
+  Newtype(f64),
+}
+
+struct Entry<K>(K);
+
+impl<K> Serialize for Entry<K>
+where
+  K: Serialize,
+{
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut map: S::SerializeMap = serializer.serialize_map(Some(1))?;
+    map.serialize_entry(&self.0, &1)?;
+    map.end()
+  }
+}
+
+struct FailWriter(usize);
 
 impl Write for FailWriter {
-  fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-    Err(io::Error::other("write failed"))
+  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    if self.0 == 0 {
+      return Err(io::Error::other(WRITE_FAILED));
+    }
+
+    let written: usize = buf.len().min(self.0);
+
+    self.0 -= written;
+
+    Ok(written)
   }
 
   fn flush(&mut self) -> io::Result<()> {
@@ -49,6 +116,17 @@ where
   K: Ord,
 {
   BTreeMap::from(entries)
+}
+
+fn flatten<const N: usize>(rest: [(&'static str, u8); N]) -> Flatten {
+  Flatten {
+    a: 1,
+    rest: map(rest),
+  }
+}
+
+fn raw(input: &str) -> Box<RawValue> {
+  RawValue::from_string(input.to_owned()).unwrap()
 }
 
 #[track_caller]
@@ -73,31 +151,45 @@ where
 
 #[test]
 fn test_integers() {
-  assert_json(MAX_SAFE_INTEGER, "9007199254740991");
-  assert_json(9_007_199_254_740_991_i64, "9007199254740991");
-  assert_json(-9_007_199_254_740_991_i64, "-9007199254740991");
-  assert_json(9_007_199_254_740_991_i128, "9007199254740991");
-  assert_json(-9_007_199_254_740_991_i128, "-9007199254740991");
-  assert_json(9_007_199_254_740_991_u128, "9007199254740991");
-  assert_json(-5_i128, "-5");
+  assert_json(i8::MIN, "-128");
+  assert_json(i16::MIN, "-32768");
+  assert_json(i32::MIN, "-2147483648");
+  assert_json(u8::MAX, "255");
+  assert_json(u16::MAX, "65535");
+  assert_json(u32::MAX, "4294967295");
+  assert_json(Meters(7), "7");
+}
+
+#[test]
+fn test_integers_safe() {
+  let max: u64 = MAX_SAFE_INTEGER;
+  let min: i64 = -9_007_199_254_740_991;
+
+  assert_json(max, "9007199254740991");
+  assert_json(min, "-9007199254740991");
+  assert_json(i128::from(max), "9007199254740991");
+  assert_json(i128::from(min), "-9007199254740991");
+  assert_json(u128::from(max), "9007199254740991");
 }
 
 #[test]
 fn test_integers_unsafe() {
-  assert_json_err(9_007_199_254_740_992_i64, UNSAFE_INTEGER);
-  assert_json_err(-9_007_199_254_740_992_i64, UNSAFE_INTEGER);
-  assert_json_err(9_007_199_254_740_992_u64, UNSAFE_INTEGER);
-  assert_json_err(9_007_199_254_740_992_i128, UNSAFE_INTEGER);
-  assert_json_err(-9_007_199_254_740_992_i128, UNSAFE_INTEGER);
-  assert_json_err(9_007_199_254_740_992_u128, UNSAFE_INTEGER);
+  let max: u64 = MAX_SAFE_INTEGER + 1;
+  let min: i64 = -9_007_199_254_740_992;
+  let parsed: Value = from_str("9007199254740992").unwrap();
+
+  assert_json_err(max, UNSAFE_INTEGER);
+  assert_json_err(min, UNSAFE_INTEGER);
+  assert_json_err(i128::from(max), UNSAFE_INTEGER);
+  assert_json_err(i128::from(min), UNSAFE_INTEGER);
+  assert_json_err(u128::from(max), UNSAFE_INTEGER);
   assert_json_err(i64::MIN, UNSAFE_INTEGER);
   assert_json_err(u64::MAX, UNSAFE_INTEGER);
   assert_json_err(i128::MIN, UNSAFE_INTEGER);
   assert_json_err(u128::MAX, UNSAFE_INTEGER);
-  assert_json_err(
-    from_str::<Value>("9007199254740992").unwrap(),
-    UNSAFE_INTEGER,
-  );
+  assert_json_err(parsed, UNSAFE_INTEGER);
+  assert_json_err([1, i64::MIN], UNSAFE_INTEGER);
+  assert_json_err(Some(u64::MAX), UNSAFE_INTEGER);
 }
 
 #[test]
@@ -109,6 +201,10 @@ fn test_floats_f32() {
 
 #[test]
 fn test_floats_non_finite() {
+  let field: Field = Field {
+    x: f64::NEG_INFINITY,
+  };
+
   assert_json_err(f64::NAN, INVALID_FLOAT);
   assert_json_err(f32::NAN, INVALID_FLOAT);
   assert_json_err(Some(f64::NAN), INVALID_FLOAT);
@@ -117,38 +213,46 @@ fn test_floats_non_finite() {
   assert_json_err(vec![f32::INFINITY], INVALID_FLOAT);
   assert_json_err(vec![vec![f64::NAN]], INVALID_FLOAT);
   assert_json_err(map([("a", f64::NAN)]), INVALID_FLOAT);
-  assert_json_err(
-    Field {
-      x: f64::NEG_INFINITY,
-    },
-    INVALID_FLOAT,
-  );
-  assert_json_err(Variant::Newtype(f64::INFINITY), INVALID_FLOAT);
+  assert_json_err(field, INVALID_FLOAT);
 }
 
 #[test]
-fn test_string_escapes() {
+fn test_strings_escapes() {
   const INPUT: &str = "\u{0}\u{8}\t\n\u{b}\u{c}\r\u{1f}\u{7f}/\"\\";
   const ESCAPED: &str = "\"\\u0000\\b\\t\\n\\u000b\\f\\r\\u001f\u{7f}/\\\"\\\\\"";
 
+  let object: String = format!("{{{ESCAPED}:1}}");
+
   assert_json(INPUT, ESCAPED);
-  assert_json(map([(INPUT, 1)]), &format!("{{{ESCAPED}:1}}"));
+  assert_json(map([(INPUT, 1)]), &object);
+}
+
+#[test]
+fn test_nulls() {
+  assert_json((), "null");
+  assert_json(None::<u8>, "null");
+  assert_json([None, Some(1)], "[null,1]");
 }
 
 #[test]
 fn test_keys_integer() {
+  let i128_min: &str = r#"{"-170141183460469231731687303715884105728":1}"#;
+  let u128_max: &str = r#"{"340282366920938463463374607431768211455":1}"#;
+
   assert_json(map([(10, 1), (9, 2)]), r#"{"10":1,"9":2}"#);
   assert_json(map([(i64::MIN, 1)]), r#"{"-9223372036854775808":1}"#);
   assert_json(map([(u64::MAX, 1)]), r#"{"18446744073709551615":1}"#);
-  assert_json(
-    map([(i128::MIN, 1)]),
-    r#"{"-170141183460469231731687303715884105728":1}"#,
-  );
-  assert_json(
-    map([(u128::MAX, 1)]),
-    r#"{"340282366920938463463374607431768211455":1}"#,
-  );
+  assert_json(map([(i128::MIN, 1)]), i128_min);
+  assert_json(map([(u128::MAX, 1)]), u128_max);
   assert_json_err(map([("a", u64::MAX)]), UNSAFE_INTEGER);
+}
+
+#[test]
+fn test_keys_float() {
+  assert_json(Entry(1.5_f64), r#"{"1.5":1}"#);
+  assert_json(Entry(1e21_f64), r#"{"1e+21":1}"#);
+  assert_json(Entry(1.1_f32), r#"{"1.100000023841858":1}"#);
+  assert!(to_string(&Entry(f64::NAN)).is_err());
 }
 
 #[test]
@@ -156,22 +260,85 @@ fn test_keys_other() {
   assert_json(map([(true, 1)]), r#"{"true":1}"#);
   assert_json(map([('x', 1)]), r#"{"x":1}"#);
   assert_json_err(map([(vec![1_u8], 1)]), NON_STRING_KEY);
+  assert_json_err(Entry(()), NON_STRING_KEY);
+}
+
+#[test]
+fn test_keys_utf16_order() {
+  let input: BTreeMap<&str, u8> = map([("\u{ffff}", 1), ("\u{10000}", 2)]);
+  let expected: &str = "{\"\u{10000}\":2,\"\u{ffff}\":1}";
+
+  assert_json(input, expected);
+}
+
+#[test]
+fn test_keys_escaped() {
+  let input: BTreeMap<&str, u8> = map([("\u{c}", 1), ("\t", 2), ("\u{8}", 3)]);
+
+  assert_json(input, r#"{"\b":3,"\t":2,"\f":1}"#);
 }
 
 #[test]
 fn test_keys_duplicate() {
-  let sorted: Flatten = Flatten {
-    a: 1,
-    rest: map([("c", 3), ("b", 2)]),
+  assert_json(flatten([("c", 3), ("b", 2)]), r#"{"a":1,"b":2,"c":3}"#);
+  assert_json_err(flatten([("a", 2)]), DUPLICATE_KEY);
+  assert_json_err([flatten([("a", 2)])], DUPLICATE_KEY);
+  assert_json_err(map([("x", flatten([("a", 2)]))]), DUPLICATE_KEY);
+}
+
+#[test]
+fn test_structs_renamed() {
+  let input: Renamed = Renamed {
+    z: 1,
+    none: None,
+    b: 2,
   };
 
-  let duplicate: Flatten = Flatten {
+  assert_json(input, r#"{"a":1,"b":2}"#);
+}
+
+#[test]
+fn test_enums_external() {
+  let input: External = External::Struct { b: 1, a: 1.5 };
+
+  assert_json(External::Unit, r#""Unit""#);
+  assert_json(External::Newtype(1.5), r#"{"Newtype":1.5}"#);
+  assert_json(External::Tuple(1, 1.5), r#"{"Tuple":[1,1.5]}"#);
+  assert_json(input, r#"{"Struct":{"a":1.5,"b":1}}"#);
+}
+
+#[test]
+fn test_enums_tagged() {
+  let internal: Internal = Internal::Struct { b: 1, a: 1.5 };
+
+  assert_json(internal, r#"{"a":1.5,"b":1,"t":"Struct"}"#);
+  assert_json(Adjacent::Newtype(1.5), r#"{"c":1.5,"t":"Newtype"}"#);
+  assert_json(Untagged::Newtype(1.5), "1.5");
+}
+
+#[test]
+fn test_enums_non_finite() {
+  let external: External = External::Struct { b: 1, a: f64::NAN };
+  let internal: Internal = Internal::Struct { b: 1, a: f64::NAN };
+
+  assert_json_err(External::Newtype(f64::NAN), INVALID_FLOAT);
+  assert_json_err(External::Tuple(1, f64::NAN), INVALID_FLOAT);
+  assert_json_err(external, INVALID_FLOAT);
+  assert_json_err(internal, INVALID_FLOAT);
+  assert_json_err(Adjacent::Newtype(f64::NAN), INVALID_FLOAT);
+  assert_json_err(Untagged::Newtype(f64::NAN), INVALID_FLOAT);
+}
+
+#[test]
+fn test_raw_value() {
+  let value: Box<RawValue> = raw(r#"{"b":[2.50,1e3],"a":"€"}"#);
+  let field: Raw = Raw {
+    b: raw(r#"{"y":1e3,"x":2.50}"#),
     a: 1,
-    rest: map([("a", 2)]),
   };
 
-  assert_json(sorted, r#"{"a":1,"b":2,"c":3}"#);
-  assert_json_err(duplicate, DUPLICATE_KEY);
+  assert_json(value, r#"{"a":"€","b":[2.5,1000]}"#);
+  assert_json(field, r#"{"a":1,"b":{"x":2.5,"y":1000}}"#);
 }
 
 #[test]
@@ -188,8 +355,24 @@ fn test_output_apis() {
 }
 
 #[test]
-fn test_output_writer_error() {
-  let received: Error = to_writer(FailWriter, &true).unwrap_err();
+fn test_output_partial() {
+  let mut written: Vec<u8> = Vec::new();
+  let received: Result<(), Error> = to_writer(&mut written, &[1.0, f64::NAN]);
 
-  assert!(received.to_string().contains("write failed"), "{received}");
+  assert!(received.is_err());
+  assert_eq!(written, b"[1,");
+}
+
+#[test]
+fn test_output_writer_error() {
+  let input: Value = from_str(r#"{"b":[1,{"z":null,"y":"é"}],"a":true}"#).unwrap();
+  let length: usize = to_vec(&input).unwrap().len();
+
+  for limit in 0..length {
+    let received: Error = to_writer(FailWriter(limit), &input).unwrap_err();
+
+    assert!(received.to_string().contains(WRITE_FAILED), "{received}");
+  }
+
+  assert!(to_writer(FailWriter(length), &input).is_ok());
 }

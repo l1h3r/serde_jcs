@@ -7,7 +7,7 @@
 
 JSON Canonicalization Scheme (JCS) for Serde.
 
-**serde_jcs** serializes [Serde][ref-url-serde] data to the canonical JSON form defined by [RFC 8785][ref-url-rfc8785].
+**serde_jcs** turns [Serde][ref-url-serde] data into the canonical JSON of [RFC 8785][ref-url-rfc8785].
 
 ---
 
