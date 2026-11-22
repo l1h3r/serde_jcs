@@ -1,6 +1,8 @@
 use serde::Serialize;
 use serde::Serializer;
+use serde::ser::Error as _;
 use serde::ser::SerializeMap as _;
+use serde::ser::SerializeSeq as _;
 use serde_jcs::MAX_SAFE_INTEGER;
 use serde_jcs::to_string;
 use serde_jcs::to_vec;
@@ -14,9 +16,12 @@ use std::io;
 use std::io::Write;
 
 const DUPLICATE_KEY: &str = "duplicate object key";
+const IGNORED_ERROR: &str = "an error was ignored";
+const INCOMPLETE_ENTRY: &str = "object entry left incomplete";
 const INVALID_FLOAT: &str = "invalid float value";
 const NON_STRING_KEY: &str = "key must be a string";
 const UNSAFE_INTEGER: &str = "integer outside safe range";
+const UNFINISHED: &str = "unfinished";
 const WRITE_FAILED: &str = "write failed";
 
 #[derive(Serialize)]
@@ -88,6 +93,73 @@ where
     let mut map: S::SerializeMap = serializer.serialize_map(Some(1))?;
     map.serialize_entry(&self.0, &1)?;
     map.end()
+  }
+}
+
+struct IgnoredError {
+  next_key: bool,
+}
+
+impl Serialize for IgnoredError {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut map: S::SerializeMap = serializer.serialize_map(None)?;
+    let _ignored: Result<(), S::Error> = map.serialize_entry("k", &f64::NAN);
+
+    if self.next_key {
+      map.serialize_entry("z", &1)?;
+    }
+
+    map.end()
+  }
+}
+
+struct IgnoredElement;
+
+impl Serialize for IgnoredElement {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut seq: S::SerializeSeq = serializer.serialize_seq(None)?;
+
+    seq.serialize_element(&1)?;
+
+    let _ignored: Result<(), S::Error> = seq.serialize_element(&f64::NAN);
+
+    seq.serialize_element(&2)?;
+    seq.end()
+  }
+}
+
+struct IgnoredNested;
+
+impl Serialize for IgnoredNested {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut map: S::SerializeMap = serializer.serialize_map(None)?;
+    let _ignored: Result<(), S::Error> = map.serialize_entry("k", &Unfinished);
+
+    map.end()
+  }
+}
+
+struct Unfinished;
+
+impl Serialize for Unfinished {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut map: S::SerializeMap = serializer.serialize_map(None)?;
+
+    map.serialize_entry("x", &1)?;
+
+    Err(S::Error::custom(UNFINISHED))
   }
 }
 
@@ -164,30 +236,54 @@ fn test_integers() {
 fn test_integers_safe() {
   let max: u64 = MAX_SAFE_INTEGER;
   let min: i64 = -9_007_199_254_740_991;
+  let parsed: Value = from_str("[9007199254740991,-9007199254740991,-0]").unwrap();
 
   assert_json(max, "9007199254740991");
   assert_json(min, "-9007199254740991");
   assert_json(i128::from(max), "9007199254740991");
   assert_json(i128::from(min), "-9007199254740991");
   assert_json(u128::from(max), "9007199254740991");
+  assert_json(parsed, "[9007199254740991,-9007199254740991,0]");
+}
+
+#[test]
+fn test_integers_same_digits() {
+  let text: &str = "[9007199254740992,-9007199254740994,1152921504606847000]";
+  let parsed: Value = from_str(text).unwrap();
+
+  assert_json(MAX_SAFE_INTEGER + 1, "9007199254740992");
+  assert_json(-9_007_199_254_740_994_i64, "-9007199254740994");
+  assert_json(1_000_000_000_000_000_000_u64, "1000000000000000000");
+  assert_json(1_152_921_504_606_847_000_u64, "1152921504606847000");
+  assert_json(295_147_905_179_352_830_000_u128, "295147905179352830000");
+  assert_json(-295_147_905_179_352_830_000_i128, "-295147905179352830000");
+  assert_json(parsed, text);
+  assert_json(raw(text), text);
 }
 
 #[test]
 fn test_integers_unsafe() {
-  let max: u64 = MAX_SAFE_INTEGER + 1;
-  let min: i64 = -9_007_199_254_740_992;
-  let parsed: Value = from_str("9007199254740992").unwrap();
+  let max: u64 = MAX_SAFE_INTEGER + 2;
+  let min: i64 = -9_007_199_254_740_993;
+  let rounded: Value = from_str("9007199254740993").unwrap();
+  let negative: Value = from_str("-9007199254740993").unwrap();
+  let exact: Value = from_str("1152921504606846976").unwrap();
 
   assert_json_err(max, UNSAFE_INTEGER);
   assert_json_err(min, UNSAFE_INTEGER);
   assert_json_err(i128::from(max), UNSAFE_INTEGER);
   assert_json_err(i128::from(min), UNSAFE_INTEGER);
   assert_json_err(u128::from(max), UNSAFE_INTEGER);
+  assert_json_err(1_u64 << 60, UNSAFE_INTEGER);
+  assert_json_err(-(1_i64 << 60), UNSAFE_INTEGER);
+  assert_json_err(1_000_000_000_000_000_000_000_u128, UNSAFE_INTEGER);
   assert_json_err(i64::MIN, UNSAFE_INTEGER);
   assert_json_err(u64::MAX, UNSAFE_INTEGER);
   assert_json_err(i128::MIN, UNSAFE_INTEGER);
   assert_json_err(u128::MAX, UNSAFE_INTEGER);
-  assert_json_err(parsed, UNSAFE_INTEGER);
+  assert_json_err(rounded, UNSAFE_INTEGER);
+  assert_json_err(negative, UNSAFE_INTEGER);
+  assert_json_err(exact, UNSAFE_INTEGER);
   assert_json_err([1, i64::MIN], UNSAFE_INTEGER);
   assert_json_err(Some(u64::MAX), UNSAFE_INTEGER);
 }
@@ -287,6 +383,22 @@ fn test_keys_duplicate() {
 }
 
 #[test]
+fn test_objects_incomplete_entry() {
+  let nested: BTreeMap<&str, IgnoredError> = map([("x", IgnoredError { next_key: false })]);
+
+  assert_json_err(IgnoredError { next_key: true }, INCOMPLETE_ENTRY);
+  assert_json_err(IgnoredError { next_key: false }, INCOMPLETE_ENTRY);
+  assert_json_err(nested, INCOMPLETE_ENTRY);
+}
+
+#[test]
+fn test_ignored_errors() {
+  assert_json_err(IgnoredElement, IGNORED_ERROR);
+  assert_json_err(IgnoredNested, IGNORED_ERROR);
+  assert_json_err(vec![IgnoredNested], IGNORED_ERROR);
+}
+
+#[test]
 fn test_structs_renamed() {
   let input: Renamed = Renamed {
     z: 1,
@@ -339,6 +451,28 @@ fn test_raw_value() {
 
   assert_json(value, r#"{"a":"€","b":[2.5,1000]}"#);
   assert_json(field, r#"{"a":1,"b":{"x":2.5,"y":1000}}"#);
+}
+
+// Under serde_json/arbitrary_precision, this covers serde_jcs's NUMBER_TOKEN.
+#[test]
+fn test_raw_value_numbers() {
+  let value: Box<RawValue> = raw(r#"[1e3,0.1,-0,9007199254740991,{"n":2.50}]"#);
+
+  assert_json(value, r#"[1000,0.1,0,9007199254740991,{"n":2.5}]"#);
+  assert_json_err(raw("9007199254740993"), UNSAFE_INTEGER);
+  assert_json_err(raw(r#"{"n":[-9007199254740993]}"#), UNSAFE_INTEGER);
+}
+
+#[test]
+fn test_raw_value_duplicate_key() {
+  let field: Raw = Raw {
+    b: raw(r#"{"a":1,"a":2}"#),
+    a: 1,
+  };
+
+  assert_json_err(raw(r#"{"a":1,"a":2}"#), DUPLICATE_KEY);
+  assert_json_err(raw(r#"[{"x":{"a":1,"a":2}}]"#), DUPLICATE_KEY);
+  assert_json_err(field, DUPLICATE_KEY);
 }
 
 #[test]
