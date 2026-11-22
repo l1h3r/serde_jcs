@@ -45,6 +45,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.0
       - run: cargo check --all-targets --all-features
 
+  minimal:
+    name: Minimal versions
+    needs: pre_ci
+    if: needs.pre_ci.outputs.continue
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo generate-lockfile -Z minimal-versions
+      - run: cargo test --locked
+
   doc:
     name: Documentation
     needs: pre_ci

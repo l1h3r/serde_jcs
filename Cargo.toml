@@ -24,13 +24,13 @@ rustdoc-args = [
 ]
 
 [dependencies]
-ryu-js = { version = "1.0", default-features = false }
-serde = { version = "1.0", default-features = false }
-serde_json = { version = "1.0", default-features = false, features = ["std", "float_roundtrip"] }
-serde-transcode = { version = "1.2", default-features = false }
+ryu-js = { version = "1.0.0", default-features = false }
+serde = { version = "1.0.166", default-features = false }
+serde_json = { version = "1.0.105", default-features = false, features = ["std", "float_roundtrip"] }
+serde-transcode = { version = "1.2.0", default-features = false }
 
 [dev-dependencies]
-serde_json = { version = "1.0", features = ["raw_value"] }
+serde_json = { version = "1.0.105", features = ["raw_value"] }
 
 # ------------------------------------------------------------------------------
 # Rustc Lints
