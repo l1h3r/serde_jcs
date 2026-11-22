@@ -38,7 +38,6 @@ serde_json = { version = "1.0.105", features = ["raw_value"] }
 # ------------------------------------------------------------------------------
 
 [lints.rust]
-# Lint Groups
 warnings = { level = "deny", priority = -1 }
 deprecated_safe = { level = "deny", priority = -1 }
 future_incompatible = { level = "deny", priority = -1 }
@@ -63,6 +62,8 @@ style = { level = "deny", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 restriction = { level = "allow", priority = -1 }
+
+manual_readme = "allow"
 
 # ------------------------------------------------------------------------------
 # Clippy Lints
