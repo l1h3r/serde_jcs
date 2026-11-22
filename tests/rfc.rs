@@ -1,52 +1,51 @@
+#[path = "common/utils.rs"]
+mod utils;
+
 use serde_jcs::to_string;
 use serde_jcs::to_vec;
-use serde_json::Error;
 use serde_json::Value;
-use serde_json::from_str;
-use serde_json::value::RawValue;
 
-#[track_caller]
-fn assert_json(input: &str, expected: &str) {
-  let json_val: Value = from_str(input).unwrap();
-  let received: String = to_string(&json_val).unwrap();
+use crate::utils::INVALID_FLOAT;
+use crate::utils::assert_json;
+use crate::utils::assert_json_err;
+use crate::utils::hex;
+use crate::utils::raw;
+use crate::utils::value;
 
-  assert_eq!(received, expected.trim());
+macro_rules! vectors {
+  ($($dir:literal => { $($test:ident: $name:literal,)* })*) => {
+    $($(
+      #[test]
+      fn $test() {
+        let input: &str = include_str!(concat!($dir, "/input/", $name, ".json"));
+        let expected: &str = include_str!(concat!($dir, "/output/", $name, ".json"));
+
+        assert_json(value(input), expected);
+      }
+    )*)*
+  };
 }
 
-#[track_caller]
-fn assert_json_bytes(input: &str, expected: &str) {
-  let json_val: Value = from_str(input).unwrap();
-  let received: Vec<u8> = to_vec(&json_val).unwrap();
-  let expected: Vec<u8> = expected
-    .split_whitespace()
-    .map(|byte| u8::from_str_radix(byte, 16).unwrap())
-    .collect();
-
-  assert_eq!(received, expected);
-}
-
-#[track_caller]
-fn assert_json_raw_err(input: &str, message: &str) {
-  let json_val: Box<RawValue> = RawValue::from_string(input.to_owned()).unwrap();
-  let received: Error = to_string(&json_val).unwrap_err();
-
-  assert!(received.to_string().contains(message), "{received}");
+vectors! {
+  "testdata/rfc8785" => {
+    test_rfc_appendix_c: "appendix_c",
+    test_rfc_appendix_e: "appendix_e",
+    test_rfc_section_3_2_3: "section_3_2_3",
+    test_rfc_section_3_2_3_order: "section_3_2_3_order",
+  }
+  "testdata/cyberphone" => {
+    test_rfc_appendix_i_arrays: "arrays",
+    test_rfc_appendix_i_french: "french",
+    test_rfc_appendix_i_structures: "structures",
+    test_rfc_appendix_i_unicode: "unicode",
+    test_rfc_appendix_i_values: "values",
+    test_rfc_appendix_i_weird: "weird",
+  }
 }
 
 #[track_caller]
 fn assert_json_number(input: u64, expected: &str) {
-  let json_val: f64 = f64::from_bits(input);
-  let received: String = to_string(&json_val).unwrap();
-
-  assert_eq!(received, expected);
-}
-
-#[track_caller]
-fn assert_json_number_err(input: u64) {
-  let json_val: f64 = f64::from_bits(input);
-  let received: Result<String, Error> = to_string(&json_val);
-
-  assert!(received.is_err());
+  assert_json(f64::from_bits(input), expected);
 }
 
 #[test]
@@ -61,8 +60,8 @@ fn test_rfc_appendix_b() {
   assert_json_number(0xc340_0000_0000_0000, "-9007199254740992"); // Max neg int
   assert_json_number(0x4430_0000_0000_0000, "295147905179352830000"); // ~2**68
 
-  assert_json_number_err(0x7fff_ffff_ffff_ffff); // NaN
-  assert_json_number_err(0x7ff0_0000_0000_0000); // Infinity
+  assert_json_err(f64::from_bits(0x7fff_ffff_ffff_ffff), INVALID_FLOAT); // NaN
+  assert_json_err(f64::from_bits(0x7ff0_0000_0000_0000), INVALID_FLOAT); // Infinity
 
   assert_json_number(0x44b5_2d02_c7e1_4af5, "9.999999999999997e+22");
   assert_json_number(0x44b5_2d02_c7e1_4af6, "1e+23");
@@ -82,73 +81,9 @@ fn test_rfc_appendix_b() {
 }
 
 #[test]
-fn test_rfc_appendix_c() {
-  assert_json(
-    include_str!("fixtures/input/appendix_c.json"),
-    include_str!("fixtures/output/appendix_c.json"),
-  );
-}
-
-#[test]
-fn test_rfc_appendix_e() {
-  assert_json(
-    include_str!("fixtures/input/appendix_e.json"),
-    include_str!("fixtures/output/appendix_e.json"),
-  );
-}
-
-#[test]
-fn test_rfc_appendix_i_arrays() {
-  assert_json(
-    include_str!("testdata/input/arrays.json"),
-    include_str!("testdata/output/arrays.json"),
-  );
-}
-
-#[test]
-fn test_rfc_appendix_i_french() {
-  assert_json(
-    include_str!("testdata/input/french.json"),
-    include_str!("testdata/output/french.json"),
-  );
-}
-
-#[test]
-fn test_rfc_appendix_i_structures() {
-  assert_json(
-    include_str!("testdata/input/structures.json"),
-    include_str!("testdata/output/structures.json"),
-  );
-}
-
-#[test]
-fn test_rfc_appendix_i_unicode() {
-  assert_json(
-    include_str!("testdata/input/unicode.json"),
-    include_str!("testdata/output/unicode.json"),
-  );
-}
-
-#[test]
-fn test_rfc_appendix_i_values() {
-  assert_json(
-    include_str!("testdata/input/values.json"),
-    include_str!("testdata/output/values.json"),
-  );
-}
-
-#[test]
-fn test_rfc_appendix_i_weird() {
-  assert_json(
-    include_str!("testdata/input/weird.json"),
-    include_str!("testdata/output/weird.json"),
-  );
-}
-
-#[test]
 fn test_rfc_es6_numbers() {
-  for case in include_str!("testdata/numbers.jsonl").lines() {
-    let case: Value = from_str(case).unwrap();
+  for case in include_str!("testdata/cyberphone/numbers.jsonl").lines() {
+    let case: Value = value(case);
     let id: &str = case["id"].as_str().unwrap();
     let bits: u64 = u64::from_str_radix(case["bits"].as_str().unwrap(), 16).unwrap();
     let expected: &str = case["expected"].as_str().unwrap();
@@ -159,32 +94,16 @@ fn test_rfc_es6_numbers() {
 }
 
 #[test]
-fn test_rfc_section_3_2_3() {
-  assert_json(
-    include_str!("fixtures/input/section_3_2_3.json"),
-    include_str!("fixtures/output/section_3_2_3.json"),
-  );
-}
-
-#[test]
-fn test_rfc_section_3_2_3_order() {
-  assert_json(
-    include_str!("fixtures/input/section_3_2_3_order.json"),
-    include_str!("fixtures/output/section_3_2_3_order.json"),
-  );
-}
-
-#[test]
 fn test_rfc_section_3_2_4() {
-  assert_json_bytes(
-    include_str!("fixtures/input/section_3_2_2.json"),
-    include_str!("fixtures/output/section_3_2_4.txt"),
-  );
+  let input: &str = include_str!("testdata/cyberphone/input/values.json");
+  let bytes: &str = include_str!("testdata/rfc8785/output/section_3_2_4.txt");
+
+  assert_eq!(to_vec(&value(input)).unwrap(), hex(bytes));
 }
 
 #[test]
 fn test_rfc_lone_surrogates() {
-  assert_json_raw_err(r#""\udead""#, "lone leading surrogate");
-  assert_json_raw_err(r#"{"\udead":1}"#, "lone leading surrogate");
-  assert_json_raw_err(r#"["\ud800"]"#, "unexpected end of hex escape");
+  assert_json_err(raw(r#""\udead""#), "lone leading surrogate");
+  assert_json_err(raw(r#"{"\udead":1}"#), "lone leading surrogate");
+  assert_json_err(raw(r#"["\ud800"]"#), "unexpected end of hex escape");
 }

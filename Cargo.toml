@@ -30,7 +30,6 @@ serde_json = { version = "1.0", default-features = false, features = ["std", "fl
 serde-transcode = { version = "1.2", default-features = false }
 
 [dev-dependencies]
-serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 
 # ------------------------------------------------------------------------------
