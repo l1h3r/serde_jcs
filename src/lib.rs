@@ -11,7 +11,6 @@
 //! [RFC 8785]: https://www.rfc-editor.org/rfc/rfc8785
 //! [Serde]: ::serde
 
-use ryu_js::Buffer;
 use serde::Serialize;
 use serde::ser::Error as _;
 use serde::ser::SerializeMap;
@@ -24,80 +23,17 @@ use serde::ser::SerializeTupleVariant;
 use serde::ser::Serializer;
 use serde_json::Error;
 use serde_json::Serializer as JsonSerializer;
-use serde_json::Value;
+use serde_json::Value as JsonValue;
 use serde_json::from_str;
 use serde_json::ser::CharEscape;
-use serde_json::ser::Formatter;
+use serde_json::ser::CompactFormatter;
+use serde_json::ser::Formatter as JsonFormatter;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
 use std::mem::take;
 use std::str::from_utf8;
-
-macro_rules! forward {
-  ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
-    $(
-      #[inline]
-      fn $name(self, $($arg: $ty),*) -> Result<Self::Ok, Self::Error> {
-        self.0.$name($($arg),*)
-      }
-    )*
-  };
-}
-
-macro_rules! forward_float {
-  ($($name:ident($ty:ty);)*) => {
-    $(
-      #[inline]
-      fn $name(self, value: $ty) -> Result<Self::Ok, Self::Error> {
-        if value.is_finite() {
-          self.0.$name(value)
-        } else {
-          Err(Self::Error::custom(invalid_float()))
-        }
-      }
-    )*
-  };
-}
-
-macro_rules! forward_compound {
-  ($($name:ident($($arg:ident: $ty:ty),*) -> $assoc:ident;)*) => {
-    $(
-      #[inline]
-      fn $name(self, $($arg: $ty),*) -> Result<Self::$assoc, Self::Error> {
-        self.0.$name($($arg),*).map(JcsSerializer)
-      }
-    )*
-  };
-}
-
-macro_rules! forward_element {
-  ($($trait:ident::$method:ident($($arg:ident: $ty:ty),*);)*) => {
-    $(
-      impl<S> $trait for JcsSerializer<S>
-      where
-        S: $trait,
-      {
-        type Ok = S::Ok;
-        type Error = S::Error;
-
-        #[inline]
-        fn $method<T>(&mut self, $($arg: $ty,)* value: &T) -> Result<(), Self::Error>
-        where
-          T: Serialize + ?Sized,
-        {
-          self.0.$method($($arg,)* &JcsValue(value))
-        }
-
-        #[inline]
-        fn end(self) -> Result<Self::Ok, Self::Error> {
-          self.0.end()
-        }
-      }
-    )*
-  };
-}
 
 /// The largest integer magnitude that can be serialized as a JSON number,
 /// `2^53 - 1`.
@@ -110,8 +46,8 @@ pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// # Errors
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
-/// `value` contains a non-finite float or an integer value outside
-/// ±[`MAX_SAFE_INTEGER`].
+/// `value` contains a non-finite float, a duplicate object key, or an integer
+/// value outside ±[`MAX_SAFE_INTEGER`].
 #[inline]
 pub fn to_string<T>(value: &T) -> Result<String, Error>
 where
@@ -130,8 +66,8 @@ where
 /// # Errors
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
-/// `value` contains a non-finite float or an integer value outside
-/// ±[`MAX_SAFE_INTEGER`].
+/// `value` contains a non-finite float, a duplicate object key, or an integer
+/// value outside ±[`MAX_SAFE_INTEGER`].
 #[inline]
 pub fn to_vec<T>(value: &T) -> Result<Vec<u8>, Error>
 where
@@ -149,8 +85,8 @@ where
 /// # Errors
 ///
 /// Serialization can fail if `T`'s implementation of `Serialize` fails, or if
-/// `value` contains a non-finite float or an integer value outside
-/// ±[`MAX_SAFE_INTEGER`].
+/// `value` contains a non-finite float, a duplicate object key, or an integer
+/// value outside ±[`MAX_SAFE_INTEGER`].
 #[inline]
 pub fn to_writer<W, T>(writer: W, value: &T) -> Result<(), Error>
 where
@@ -193,155 +129,22 @@ fn unsafe_integer() -> io::Error {
 }
 
 // -----------------------------------------------------------------------------
-// UTF-16 Key
+// JCS Formatter
 // -----------------------------------------------------------------------------
 
-struct Utf16Key {
-  tag: Vec<u16>,
-  key: Vec<u8>,
-}
-
-impl Utf16Key {
-  fn new(key: Vec<u8>) -> io::Result<Self> {
-    #[inline]
-    fn unescape(text: &str) -> Option<(u16, &str)> {
-      let (&escape, _): (&u8, _) = text.as_bytes().split_first()?;
-      let text: &str = text.get(1..)?;
-
-      match escape {
-        b'"' | b'\\' | b'/' => Some((u16::from(escape), text)),
-        b'b' => Some((0x08, text)),
-        b'f' => Some((0x0C, text)),
-        b'n' => Some((0x0A, text)),
-        b'r' => Some((0x0D, text)),
-        b't' => Some((0x09, text)),
-        b'u' => {
-          let (code, text): (&str, &str) = text.split_at_checked(4)?;
-          let unit: u16 = u16::from_str_radix(code, 16).ok()?;
-
-          Some((unit, text))
-        }
-        _ => None,
+macro_rules! forward_scope {
+  ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
+    $(
+      #[inline]
+      fn $name<W>(&mut self, writer: &mut W, $($arg: $ty),*) -> io::Result<()>
+      where
+        W: Write + ?Sized,
+      {
+        CompactFormatter.$name(&mut self.scope(writer), $($arg),*)
       }
-    }
-
-    let mut text: &str = from_utf8(&key)
-      .ok()
-      .and_then(|text| text.strip_prefix('"'))
-      .and_then(|text| text.strip_suffix('"'))
-      .ok_or_else(invalid_key)?;
-
-    let mut tag: Vec<u16> = Vec::with_capacity(text.len());
-
-    while let Some((head, tail)) = text.split_once('\\') {
-      let (unit, tail): (u16, &str) = unescape(tail).ok_or_else(invalid_key)?;
-
-      tag.extend(head.encode_utf16());
-      tag.push(unit);
-      text = tail;
-    }
-
-    tag.extend(text.encode_utf16());
-
-    Ok(Self { tag, key })
-  }
+    )*
+  };
 }
-
-impl PartialEq for Utf16Key {
-  #[inline]
-  fn eq(&self, other: &Self) -> bool {
-    self.tag.eq(&other.tag)
-  }
-}
-
-impl Eq for Utf16Key {}
-
-impl PartialOrd for Utf16Key {
-  #[inline]
-  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-    Some(self.cmp(other))
-  }
-}
-
-impl Ord for Utf16Key {
-  #[inline]
-  fn cmp(&self, other: &Self) -> Ordering {
-    self.tag.cmp(&other.tag)
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Formatter Entry
-// -----------------------------------------------------------------------------
-
-struct Entry {
-  object: BTreeMap<Utf16Key, Vec<u8>>,
-  next_key: Vec<u8>,
-  next_val: Vec<u8>,
-  complete: bool,
-}
-
-impl Entry {
-  #[inline]
-  const fn new() -> Self {
-    Self {
-      object: BTreeMap::new(),
-      next_key: Vec::new(),
-      next_val: Vec::new(),
-      complete: false,
-    }
-  }
-
-  #[inline]
-  const fn complete(&mut self, value: bool) {
-    self.complete = value;
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Formatter Scope
-// -----------------------------------------------------------------------------
-
-enum Scope<'a, W>
-where
-  W: Write + ?Sized,
-{
-  Buffer(&'a mut Vec<u8>),
-  Writer(&'a mut W),
-}
-
-impl<W> Write for Scope<'_, W>
-where
-  W: Write + ?Sized,
-{
-  #[inline]
-  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-    match self {
-      Self::Buffer(buffer) => buffer.write(buf),
-      Self::Writer(writer) => writer.write(buf),
-    }
-  }
-
-  #[inline]
-  fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-    match self {
-      Self::Buffer(buffer) => buffer.write_all(buf),
-      Self::Writer(writer) => writer.write_all(buf),
-    }
-  }
-
-  #[inline]
-  fn flush(&mut self) -> io::Result<()> {
-    match self {
-      Self::Buffer(buffer) => buffer.flush(),
-      Self::Writer(writer) => writer.flush(),
-    }
-  }
-}
-
-// -----------------------------------------------------------------------------
-// JSON Formatter
-// -----------------------------------------------------------------------------
 
 struct JcsFormatter {
   entries: Vec<Entry>,
@@ -376,58 +179,34 @@ impl JcsFormatter {
   fn in_key(&self) -> bool {
     self.entries.last().is_some_and(|entry| !entry.complete)
   }
+
+  #[inline]
+  fn check_integer(&self, magnitude: u128) -> io::Result<()> {
+    if self.in_key() || magnitude <= u128::from(MAX_SAFE_INTEGER) {
+      Ok(())
+    } else {
+      Err(unsafe_integer())
+    }
+  }
 }
 
-impl Formatter for JcsFormatter {
-  #[inline]
-  fn write_null<W>(&mut self, writer: &mut W) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.scope(writer).write_all(b"null")
-  }
-
-  #[inline]
-  fn write_bool<W>(&mut self, writer: &mut W, value: bool) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    if value {
-      self.scope(writer).write_all(b"true")
-    } else {
-      self.scope(writer).write_all(b"false")
-    }
-  }
-
-  #[inline]
-  fn write_char_escape<W>(&mut self, writer: &mut W, escape: CharEscape) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    #[inline]
-    fn serialize(control: u8) -> [u8; 6] {
-      static HEX: [u8; 16] = *b"0123456789abcdef";
-      [
-        b'\\',
-        b'u',
-        b'0',
-        b'0',
-        HEX[(control >> 4) as usize],
-        HEX[(control & 0xF) as usize],
-      ]
-    }
-
-    match escape {
-      CharEscape::Quote => self.scope(writer).write_all(b"\\\""),
-      CharEscape::ReverseSolidus => self.scope(writer).write_all(b"\\\\"),
-      CharEscape::Solidus => self.scope(writer).write_all(b"/"),
-      CharEscape::Backspace => self.scope(writer).write_all(b"\\b"),
-      CharEscape::FormFeed => self.scope(writer).write_all(b"\\f"),
-      CharEscape::LineFeed => self.scope(writer).write_all(b"\\n"),
-      CharEscape::CarriageReturn => self.scope(writer).write_all(b"\\r"),
-      CharEscape::Tab => self.scope(writer).write_all(b"\\t"),
-      CharEscape::AsciiControl(control) => self.scope(writer).write_all(&serialize(control)),
-    }
+impl JsonFormatter for JcsFormatter {
+  forward_scope! {
+    write_null();
+    write_bool(value: bool);
+    write_char_escape(escape: CharEscape);
+    write_string_fragment(fragment: &str);
+    write_i8(value: i8);
+    write_i16(value: i16);
+    write_i32(value: i32);
+    write_u8(value: u8);
+    write_u16(value: u16);
+    write_u32(value: u32);
+    begin_string();
+    end_string();
+    begin_array();
+    end_array();
+    begin_array_value(first: bool);
   }
 
   #[inline]
@@ -439,138 +218,50 @@ impl Formatter for JcsFormatter {
   }
 
   #[inline]
-  fn write_string_fragment<W>(&mut self, writer: &mut W, fragment: &str) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.scope(writer).write_all(fragment.as_bytes())
-  }
-
-  #[inline]
   fn write_raw_fragment<W>(&mut self, writer: &mut W, fragment: &str) -> io::Result<()>
   where
     W: Write + ?Sized,
   {
     let mut scope: Scope<'_, W> = self.scope(writer);
-    let value: Value = from_str(fragment)?;
+    let value: JsonValue = from_str(fragment)?;
 
     to_writer(&mut scope as &mut dyn Write, &value).map_err(Into::into)
   }
 
   #[inline]
-  fn write_i8<W>(&mut self, writer: &mut W, value: i8) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.write_f64(writer, f64::from(value))
-  }
-
-  #[inline]
-  fn write_i16<W>(&mut self, writer: &mut W, value: i16) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.write_f64(writer, f64::from(value))
-  }
-
-  #[inline]
-  fn write_i32<W>(&mut self, writer: &mut W, value: i32) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.write_f64(writer, f64::from(value))
-  }
-
-  #[expect(clippy::cast_precision_loss)]
-  #[inline]
   fn write_i64<W>(&mut self, writer: &mut W, value: i64) -> io::Result<()>
   where
     W: Write + ?Sized,
   {
-    if self.in_key() {
-      return write!(self.scope(writer), "{value}");
-    }
-
-    if value.unsigned_abs() > MAX_SAFE_INTEGER {
-      return Err(unsafe_integer());
-    }
-
-    self.write_f64(writer, value as f64)
+    self.check_integer(value.unsigned_abs().into())?;
+    CompactFormatter.write_i64(&mut self.scope(writer), value)
   }
 
-  #[expect(clippy::cast_precision_loss)]
   #[inline]
   fn write_i128<W>(&mut self, writer: &mut W, value: i128) -> io::Result<()>
   where
     W: Write + ?Sized,
   {
-    if self.in_key() {
-      return write!(self.scope(writer), "{value}");
-    }
-
-    if value.unsigned_abs() > u128::from(MAX_SAFE_INTEGER) {
-      return Err(unsafe_integer());
-    }
-
-    self.write_f64(writer, value as f64)
+    self.check_integer(value.unsigned_abs())?;
+    CompactFormatter.write_i128(&mut self.scope(writer), value)
   }
 
-  #[inline]
-  fn write_u8<W>(&mut self, writer: &mut W, value: u8) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.write_f64(writer, f64::from(value))
-  }
-
-  #[inline]
-  fn write_u16<W>(&mut self, writer: &mut W, value: u16) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.write_f64(writer, f64::from(value))
-  }
-
-  #[inline]
-  fn write_u32<W>(&mut self, writer: &mut W, value: u32) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.write_f64(writer, f64::from(value))
-  }
-
-  #[expect(clippy::cast_precision_loss)]
   #[inline]
   fn write_u64<W>(&mut self, writer: &mut W, value: u64) -> io::Result<()>
   where
     W: Write + ?Sized,
   {
-    if self.in_key() {
-      return write!(self.scope(writer), "{value}");
-    }
-
-    if value > MAX_SAFE_INTEGER {
-      return Err(unsafe_integer());
-    }
-
-    self.write_f64(writer, value as f64)
+    self.check_integer(value.into())?;
+    CompactFormatter.write_u64(&mut self.scope(writer), value)
   }
 
-  #[expect(clippy::cast_precision_loss)]
   #[inline]
   fn write_u128<W>(&mut self, writer: &mut W, value: u128) -> io::Result<()>
   where
     W: Write + ?Sized,
   {
-    if self.in_key() {
-      return write!(self.scope(writer), "{value}");
-    }
-
-    if value > u128::from(MAX_SAFE_INTEGER) {
-      return Err(unsafe_integer());
-    }
-
-    self.write_f64(writer, value as f64)
+    self.check_integer(value)?;
+    CompactFormatter.write_u128(&mut self.scope(writer), value)
   }
 
   #[inline]
@@ -586,66 +277,24 @@ impl Formatter for JcsFormatter {
   where
     W: Write + ?Sized,
   {
-    if value.is_finite() {
-      let mut buffer: Buffer = Buffer::new();
-      let mut writer: Scope<'_, W> = self.scope(writer);
+    #[expect(
+      clippy::cast_possible_truncation,
+      clippy::cast_precision_loss,
+      reason = "exact in safe range"
+    )]
+    if value.fract() == 0.0 && value.abs() <= MAX_SAFE_INTEGER as f64 {
+      return CompactFormatter.write_i64(&mut self.scope(writer), value as i64);
+    }
 
-      writer.write_all(buffer.format_finite(value).as_bytes())
+    if value.is_finite() {
+      let mut buffer: ryu_js::Buffer = ryu_js::Buffer::new();
+
+      self
+        .scope(writer)
+        .write_all(buffer.format_finite(value).as_bytes())
     } else {
       Err(invalid_float())
     }
-  }
-
-  #[inline]
-  fn begin_string<W>(&mut self, writer: &mut W) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.scope(writer).write_all(b"\"")
-  }
-
-  #[inline]
-  fn end_string<W>(&mut self, writer: &mut W) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.scope(writer).write_all(b"\"")
-  }
-
-  #[inline]
-  fn begin_array<W>(&mut self, writer: &mut W) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.scope(writer).write_all(b"[")
-  }
-
-  #[inline]
-  fn end_array<W>(&mut self, writer: &mut W) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    self.scope(writer).write_all(b"]")
-  }
-
-  #[inline]
-  fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    if first {
-      Ok(())
-    } else {
-      self.scope(writer).write_all(b",")
-    }
-  }
-
-  #[inline]
-  fn end_array_value<W>(&mut self, _writer: &mut W) -> io::Result<()>
-  where
-    W: Write + ?Sized,
-  {
-    Ok(())
   }
 
   #[inline]
@@ -729,7 +378,7 @@ impl Formatter for JcsFormatter {
     let key: Vec<u8> = take(&mut entry.next_key);
     let val: Vec<u8> = take(&mut entry.next_val);
 
-    if entry.object.insert(Utf16Key::new(key)?, val).is_some() {
+    if entry.object.insert(EntryKey::new(key)?, val).is_some() {
       return Err(duplicate_key());
     }
 
@@ -738,7 +387,154 @@ impl Formatter for JcsFormatter {
 }
 
 // -----------------------------------------------------------------------------
-// JSON Value
+// JCS Formatter - Scope
+// -----------------------------------------------------------------------------
+
+enum Scope<'a, W>
+where
+  W: Write + ?Sized,
+{
+  Buffer(&'a mut Vec<u8>),
+  Writer(&'a mut W),
+}
+
+impl<W> Write for Scope<'_, W>
+where
+  W: Write + ?Sized,
+{
+  #[inline]
+  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    match self {
+      Self::Buffer(buffer) => buffer.write(buf),
+      Self::Writer(writer) => writer.write(buf),
+    }
+  }
+
+  #[inline]
+  fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+    match self {
+      Self::Buffer(buffer) => buffer.write_all(buf),
+      Self::Writer(writer) => writer.write_all(buf),
+    }
+  }
+
+  #[inline]
+  fn flush(&mut self) -> io::Result<()> {
+    match self {
+      Self::Buffer(buffer) => buffer.flush(),
+      Self::Writer(writer) => writer.flush(),
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// JCS Formatter - Entry
+// -----------------------------------------------------------------------------
+
+struct Entry {
+  object: BTreeMap<EntryKey, Vec<u8>>,
+  next_key: Vec<u8>,
+  next_val: Vec<u8>,
+  complete: bool,
+}
+
+impl Entry {
+  #[inline]
+  const fn new() -> Self {
+    Self {
+      object: BTreeMap::new(),
+      next_key: Vec::new(),
+      next_val: Vec::new(),
+      complete: false,
+    }
+  }
+
+  #[inline]
+  const fn complete(&mut self, value: bool) {
+    self.complete = value;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// JCS Formatter - Entry Key
+// -----------------------------------------------------------------------------
+
+struct EntryKey {
+  tag: Vec<u16>,
+  key: Vec<u8>,
+}
+
+impl EntryKey {
+  fn new(key: Vec<u8>) -> io::Result<Self> {
+    #[inline]
+    fn unescape(text: &str) -> Option<(u16, &str)> {
+      let escape: u8 = *text.as_bytes().first()?;
+      let text: &str = text.get(1..)?;
+
+      match escape {
+        b'"' | b'\\' | b'/' => Some((u16::from(escape), text)),
+        b'b' => Some((0x08, text)),
+        b'f' => Some((0x0C, text)),
+        b'n' => Some((0x0A, text)),
+        b'r' => Some((0x0D, text)),
+        b't' => Some((0x09, text)),
+        b'u' => {
+          let (code, text): (&str, &str) = text.split_at_checked(4)?;
+          let unit: u16 = u16::from_str_radix(code, 16).ok()?;
+
+          Some((unit, text))
+        }
+        _ => None,
+      }
+    }
+
+    let mut text: &str = from_utf8(&key)
+      .ok()
+      .and_then(|text| text.strip_prefix('"'))
+      .and_then(|text| text.strip_suffix('"'))
+      .ok_or_else(invalid_key)?;
+
+    let mut tag: Vec<u16> = Vec::with_capacity(text.len());
+
+    while let Some((head, tail)) = text.split_once('\\') {
+      let (unit, tail): (u16, &str) = unescape(tail).ok_or_else(invalid_key)?;
+
+      tag.extend(head.encode_utf16());
+      tag.push(unit);
+      text = tail;
+    }
+
+    tag.extend(text.encode_utf16());
+
+    Ok(Self { tag, key })
+  }
+}
+
+impl PartialEq for EntryKey {
+  #[inline]
+  fn eq(&self, other: &Self) -> bool {
+    self.tag.eq(&other.tag)
+  }
+}
+
+impl Eq for EntryKey {}
+
+impl PartialOrd for EntryKey {
+  #[inline]
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl Ord for EntryKey {
+  #[inline]
+  fn cmp(&self, other: &Self) -> Ordering {
+    self.tag.cmp(&other.tag)
+  }
+}
+
+// -----------------------------------------------------------------------------
+// JCS Value
 // -----------------------------------------------------------------------------
 
 struct JcsValue<'a, T>(&'a T)
@@ -759,8 +555,72 @@ where
 }
 
 // -----------------------------------------------------------------------------
-// JSON Serializer
+// JCS Serializer
 // -----------------------------------------------------------------------------
+
+macro_rules! forward {
+  ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
+    $(
+      #[inline]
+      fn $name(self, $($arg: $ty),*) -> Result<Self::Ok, Self::Error> {
+        self.0.$name($($arg),*)
+      }
+    )*
+  };
+}
+
+macro_rules! forward_float {
+  ($($name:ident($ty:ty);)*) => {
+    $(
+      #[inline]
+      fn $name(self, value: $ty) -> Result<Self::Ok, Self::Error> {
+        if value.is_finite() {
+          self.0.$name(value)
+        } else {
+          Err(Self::Error::custom($crate::invalid_float()))
+        }
+      }
+    )*
+  };
+}
+
+macro_rules! forward_compound {
+  ($($name:ident($($arg:ident: $ty:ty),*) -> $assoc:ident;)*) => {
+    $(
+      #[inline]
+      fn $name(self, $($arg: $ty),*) -> Result<Self::$assoc, Self::Error> {
+        self.0.$name($($arg),*).map($crate::JcsSerializer)
+      }
+    )*
+  };
+}
+
+macro_rules! forward_element {
+  ($($trait:ident::$method:ident($($arg:ident: $ty:ty),*);)*) => {
+    $(
+      impl<S> $trait for $crate::JcsSerializer<S>
+      where
+        S: $trait,
+      {
+        type Ok = S::Ok;
+        type Error = S::Error;
+
+        #[inline]
+        fn $method<T>(&mut self, $($arg: $ty,)* value: &T) -> Result<(), Self::Error>
+        where
+          T: ::serde::Serialize + ?Sized,
+        {
+          self.0.$method($($arg,)* &JcsValue(value))
+        }
+
+        #[inline]
+        fn end(self) -> Result<Self::Ok, Self::Error> {
+          self.0.end()
+        }
+      }
+    )*
+  };
+}
 
 struct JcsSerializer<S>(S);
 
