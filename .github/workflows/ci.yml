@@ -4,6 +4,7 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  schedule: [cron: "40 1 * * *"]
 
 permissions:
   contents: read
@@ -84,6 +85,18 @@ jobs:
       - run: cargo miri test
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
+
+  fuzz:
+    name: Fuzz
+    needs: pre_ci
+    if: needs.pre_ci.outputs.continue
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/install@cargo-fuzz
+      - run: cargo fuzz check
 
   clippy:
     name: Clippy

@@ -174,8 +174,11 @@ fn test_keys_other() {
 fn test_keys_utf16_order() {
   let input: BTreeMap<&str, u8> = map([("\u{ffff}", 1), ("\u{10000}", 2)]);
   let expected: &str = "{\"\u{10000}\":2,\"\u{ffff}\":1}";
+  let escaped: &str = r#"{"\uFF61":0,"\uD83D\uDE00":0}"#;
 
   assert_json(input, expected);
+  assert_json(value(escaped), r#"{"😀":0,"｡":0}"#);
+  assert_json(raw(escaped), r#"{"😀":0,"｡":0}"#);
 }
 
 #[test]
@@ -276,7 +279,26 @@ fn test_raw_value_duplicate_key() {
 
   assert_json_err(raw(r#"{"a":1,"a":2}"#), DUPLICATE_KEY);
   assert_json_err(raw(r#"[{"x":{"a":1,"a":2}}]"#), DUPLICATE_KEY);
+  assert_json_err(raw(r#"{"b":{"a":1,"a":2}}"#), DUPLICATE_KEY);
+  assert_json_err(raw(r#"{"a":1,"\u0061":2}"#), DUPLICATE_KEY);
   assert_json_err(field, DUPLICATE_KEY);
+}
+
+#[test]
+fn test_raw_value_duplicate_key_unsafe() {
+  let input: &str = r#"{"a":[9007199254740993],"a":0}"#;
+
+  assert_json(value(input), r#"{"a":0}"#);
+  assert_json_err(raw(input), UNSAFE_INTEGER);
+}
+
+#[test]
+fn test_raw_value_nested() {
+  let input: &str = r#"[{"b":[1,{"z":1,"a":[1e21,1.0,-0]}]}]"#;
+  let expected: &str = r#"[{"b":[1,{"a":[1e+21,1,0],"z":1}]}]"#;
+
+  assert_json(value(input), expected);
+  assert_json(raw(input), expected);
 }
 
 #[test]
