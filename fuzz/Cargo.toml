@@ -1,0 +1,25 @@
+[package]
+name = "serde_jcs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.serde_jcs]
+path = ".."
+
+[dependencies.serde_json]
+version = "1.0"
+features = ["preserve_order", "raw_value"]
+
+[[bin]]
+name = "canonicalize"
+path = "fuzz_targets/canonicalize.rs"
+test = false
+doc = false
+bench = false
